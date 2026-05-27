@@ -1,0 +1,40 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Notebook/cache/temp
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.cache/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Model weights and artifacts
+*.pth
+*.pt
+
+# Generated outputs
+skin_output/
+predict_output/
+final_output/
+heatmap_output/
+report/
+results/
+final_results/
+web_demo_inputs/
+web_demo_output/
+
+# Logs
+*.log
