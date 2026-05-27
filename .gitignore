@@ -36,5 +36,8 @@ final_results/
 web_demo_inputs/
 web_demo_output/
 
+# Raw dataset
+dataset/
+
 # Logs
 *.log
