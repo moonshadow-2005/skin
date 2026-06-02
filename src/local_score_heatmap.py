@@ -16,6 +16,13 @@ from Unet import UNet
 from skin import analyze_skin_texture
 
 
+def imread_unicode(image_path: str, flags=cv2.IMREAD_COLOR):
+    data = np.fromfile(image_path, dtype=np.uint8)
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, flags)
+
+
 def dynamic_radius_from_size(
     height: int,
     width: int,
@@ -47,7 +54,8 @@ def predict_mask(image_path: str, model_path: str, device: str) -> np.ndarray:
     model.to(device)
     model.eval()
 
-    image_bgr = cv2.imread(image_path)
+    # Use unicode-safe reading for Windows non-ASCII paths.
+    image_bgr = imread_unicode(image_path, cv2.IMREAD_COLOR)
     if image_bgr is None:
         raise FileNotFoundError(f"Cannot read image: {image_path}")
 
@@ -236,7 +244,7 @@ def run_for_id(
     # Ensure texture line image exists and is up-to-date for this image.
     analyze_skin_texture(str(image_path), model_path=str(root / model_path), device=device)
     texture_path = root / "skin_output" / f"only_texture_line_{num}.png"
-    tex = cv2.imread(str(texture_path), cv2.IMREAD_GRAYSCALE)
+    tex = imread_unicode(str(texture_path), cv2.IMREAD_GRAYSCALE)
     if tex is None:
         raise FileNotFoundError(f"Texture image not found: {texture_path}")
 
@@ -291,7 +299,7 @@ def run_for_id(
     heatmap_rgb = make_heatmap_image(score_norm, region_mask)
     heatmap_bgr = cv2.cvtColor(heatmap_rgb, cv2.COLOR_RGB2BGR)
 
-    original = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    original = imread_unicode(str(image_path), cv2.IMREAD_COLOR)
     if original is None:
         raise FileNotFoundError(f"Cannot read image: {image_path}")
     if original.shape[:2] != heatmap_bgr.shape[:2]:

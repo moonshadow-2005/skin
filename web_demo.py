@@ -138,7 +138,7 @@ def compute_score_map_custom(
     if np.sum(region_mask) == 0:
         raise RuntimeError("目标区域为空，请切换 target_class 或检查图片质量。")
 
-    tex = cv2.imread(str(texture_path), cv2.IMREAD_GRAYSCALE)
+    tex = imread_unicode(texture_path, cv2.IMREAD_GRAYSCALE)
     if tex is None:
         raise FileNotFoundError(f"纹理图不存在: {texture_path}")
     if tex.shape != pred.shape:
@@ -372,6 +372,14 @@ def run_heatmap_and_worst(
         boxes.append(box)
         means.append(mean_orientation_degrees(result["orientations"], result["region_mask"], box))
         forbidden.append(box)
+
+    # Remove stale worst-box artifacts so UI always reflects the current run.
+    for stale in out_dir.glob(f"{image_path.stem}_worst*_box.png"):
+        stale.unlink(missing_ok=True)
+    for stale in out_dir.glob(f"{image_path.stem}_worst*_direction.png"):
+        stale.unlink(missing_ok=True)
+    for stale in out_dir.glob(f"{image_path.stem}_worst*_info.txt"):
+        stale.unlink(missing_ok=True)
 
     draw_outputs(
         image_path=image_path,
@@ -798,8 +806,8 @@ def app():
             "将 Presence 分级结果叠加到原图，用于直观查看各档分布范围。",
         )
 
-        worst_box_img = sorted(out_dir.glob("*_worst*_box.png"))
-        worst_dir_img = sorted(out_dir.glob("*_worst*_direction.png"))
+        worst_box_img = sorted(out_dir.glob("*_worst*_box.png"), key=lambda p: p.stat().st_mtime)
+        worst_dir_img = sorted(out_dir.glob("*_worst*_direction.png"), key=lambda p: p.stat().st_mtime)
         if worst_box_img:
             show_image_with_explain(
                 worst_box_img[-1],
