@@ -240,6 +240,27 @@ def mean_orientation_degrees(orientations: np.ndarray, mask: np.ndarray, box):
     return float(deg)
 
 
+def axis_aligned_bbox_center(binary_mask: np.ndarray) -> tuple[int, int] | None:
+    ys, xs = np.where(binary_mask > 0)
+    if ys.size == 0:
+        return None
+    x1, x2 = int(np.min(xs)), int(np.max(xs))
+    y1, y2 = int(np.min(ys)), int(np.max(ys))
+    cx = int(round((x1 + x2) / 2.0))
+    cy = int(round((y1 + y2) / 2.0))
+    return (cx, cy)
+
+
+def orient_angle_towards_vector(mean_deg: float, vec_x: float, vec_y: float) -> float:
+    """Pick angle from {theta, theta+180} so it is not obtuse to target vector."""
+    theta = np.radians(mean_deg)
+    vx, vy = np.cos(theta), np.sin(theta)
+    dot = vx * vec_x + vy * vec_y
+    if dot < 0:
+        theta = (theta + np.pi) % (2.0 * np.pi)
+    return float(np.degrees(theta))
+
+
 def draw_outputs(
     image_path: Path,
     out_dir: Path,
@@ -256,6 +277,10 @@ def draw_outputs(
     # class 1 (affected area): green, class 2 (keloid body): cyan.
     class1 = (pred == 1).astype(np.uint8)
     class2 = (pred == 2).astype(np.uint8)
+    anchor = axis_aligned_bbox_center(class2)
+    if anchor is None:
+        # Fallback to class1 center if class2 is absent.
+        anchor = axis_aligned_bbox_center(class1)
 
     def draw_boundary(canvas: np.ndarray, binary_mask: np.ndarray, color_bgr: tuple[int, int, int]):
         contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -285,25 +310,52 @@ def draw_outputs(
         )
 
     vis_dir = vis_box.copy()
+    constrained_degs: list[float | None] = []
     for i, box in enumerate(boxes):
         mean_deg = mean_degs[i] if i < len(mean_degs) else None
         if mean_deg is None:
+            constrained_degs.append(None)
             continue
         color = box_colors[i % len(box_colors)]
-        theta = np.radians(mean_deg)
-        length = 35
         cx, cy = box["xc"], box["yc"]
+
+        directed_deg = float(mean_deg)
+        if anchor is not None:
+            ax, ay = anchor
+            vec_x = float(cx - ax)
+            vec_y = float(cy - ay)
+            if abs(vec_x) > 1e-6 or abs(vec_y) > 1e-6:
+                directed_deg = orient_angle_towards_vector(mean_deg, vec_x, vec_y)
+
+        constrained_degs.append(directed_deg)
+
+        theta = np.radians(directed_deg)
+        length = 35
         dx = int(round(np.cos(theta) * length))
         dy = int(round(np.sin(theta) * length))
         cv2.arrowedLine(vis_dir, (cx, cy), (cx + dx, cy + dy), color, 3, tipLength=0.2)
         y_text = min(vis_dir.shape[0] - 10 - i * 25, box["y2"] + 25)
         cv2.putText(
             vis_dir,
-            f"Box{i+1} mean direction(masked): {mean_deg:.1f} deg",
+            f"Box{i+1} direction(constrained): {directed_deg:.1f} deg",
             (max(5, box["x1"]), max(20, y_text)),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,
             color,
+            2,
+            cv2.LINE_AA,
+        )
+
+    if anchor is not None:
+        ax, ay = anchor
+        cv2.circle(vis_dir, (ax, ay), 4, (255, 255, 255), -1)
+        cv2.putText(
+            vis_dir,
+            "A",
+            (ax + 6, max(15, ay - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 255, 255),
             2,
             cv2.LINE_AA,
         )
@@ -333,6 +385,11 @@ def draw_outputs(
                 f.write(f"box{i}_mean_direction_deg=nan\n")
             else:
                 f.write(f"box{i}_mean_direction_deg={mean_deg:.6f}\n")
+            constrained_deg = constrained_degs[i - 1] if i - 1 < len(constrained_degs) else None
+            if constrained_deg is None:
+                f.write(f"box{i}_constrained_direction_deg=nan\n")
+            else:
+                f.write(f"box{i}_constrained_direction_deg={constrained_deg:.6f}\n")
 
 
 def main():
@@ -344,7 +401,7 @@ def main():
     parser.add_argument("--radius", type=int, default=None, help="Local score radius; default scales by image size")
     parser.add_argument("--target-class", type=int, default=1, choices=[1, 2], help="Target mask class")
     parser.add_argument("--box-size", type=int, default=None, help="Worst box size; default scales by image size")
-    parser.add_argument("--num-boxes", type=int, default=1, choices=[1, 2, 3], help="Number of non-overlapping boxes")
+    parser.add_argument("--num-boxes", type=int, default=1, choices=[1, 2, 3, 4, 5], help="Number of non-overlapping boxes")
     parser.add_argument("--min-overlap", type=float, default=0.30, help="Minimum mask overlap ratio for candidate boxes")
     parser.add_argument("--overlap-power", type=float, default=0.35, help="Soft overlap weighting exponent in objective")
     parser.add_argument("--model", default="best_trans_unet_model_20250614_122913.pth", help="Model checkpoint")

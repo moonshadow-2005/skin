@@ -132,8 +132,9 @@ best_unet_model/
     - class1 默认使用 effective mask（close -> dilate -> erode）
     - presence_map 采用 effective mask 内四分位分级配色（蓝 -> 青 -> 黄 -> 红）
 - src/worst_box_direction.py
-  - 在有效区域内选择最严重框（支持 1~3 个不重叠框）
+  - 在有效区域内选择最严重框（支持 1~5 个不重叠框）
   - 支持半径和框大小按图像尺度自动缩放（也可手动指定）
+  - 箭头方向约束：相对瘢痕主体外接矩形中心 A 与框中心 B，最终方向与 A->B 不成钝角
 
 ### 3) 精简目录构建
 
@@ -200,6 +201,10 @@ python src/local_score_heatmap.py 66 --target-class 1 --radius 40 --output-subdi
 python src/worst_box_direction.py 66 --radius 40 --box-size 80 --num-boxes 1 --output-subdir r40
 ```
 
+支持范围：
+
+- `--num-boxes` 可设置 `1~5`
+
 ### 5) 从已有 results 生成精简目录
 
 ```bash
@@ -217,10 +222,12 @@ streamlit run web_demo.py
 - 上传任意图片后，一键生成主要中间结果并展示：分割、纹理、方向、扇区、最终叠加。
 - 可在侧边栏手动调整参数后重复生成：
   - Heatmap radius（动态/固定）
-  - Presence 分级数与每条分界线（0~1归一化阈值）
+  - Presence 分级数与每条分界线（支持 threshold 模式: 0~1，quantile 模式: 0~100 分位）
   - 纹理阈值、密度/一致性权重、热图叠加透明度
-  - 最严重框大小（动态/固定）、框数量、最小覆盖率
+  - 最严重框大小（动态/固定）、框数量（1~5）、最小覆盖率
 - 支持“仅重算热图/最严重框”，用于快速调参到满意效果。
+- 运行按钮固定在侧边栏，滚动页面时无需回到顶部。
+- `web_demo_output/` 下会按 `原图名__case_id/` 创建目录，并自动保存原图 PNG 副本：`00_original__*.png`。
 
 ### 7) 单图全流程（路径或病例ID）
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import re
+import shutil
 from pathlib import Path
 from typing import List, Tuple
 
@@ -40,6 +42,11 @@ INPUT_DIR = PROJECT_ROOT / "web_demo_inputs"
 OUTPUT_DIR = PROJECT_ROOT / "web_demo_output"
 
 
+def sanitize_name(name: str) -> str:
+    cleaned = re.sub(r"[\\/:*?\"<>|]+", "_", name).strip()
+    return cleaned or "uploaded_image"
+
+
 def imread_unicode(image_path: Path, flags=cv2.IMREAD_COLOR):
     data = np.fromfile(str(image_path), dtype=np.uint8)
     if data.size == 0:
@@ -47,17 +54,38 @@ def imread_unicode(image_path: Path, flags=cv2.IMREAD_COLOR):
     return cv2.imdecode(data, flags)
 
 
-def save_uploaded_file(uploaded) -> tuple[Path, str]:
+def save_uploaded_file(uploaded) -> tuple[Path, str, str, str]:
     INPUT_DIR.mkdir(parents=True, exist_ok=True)
     content = uploaded.getvalue()
     digest = hashlib.md5(content).hexdigest()[:10]
+    original_name = Path(uploaded.name).name
+    original_stem = sanitize_name(Path(original_name).stem)
     ext = Path(uploaded.name).suffix.lower() or ".jpg"
     if ext not in {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}:
         ext = ".jpg"
     case_id = f"web_{digest}"
+    output_folder = f"{original_stem}__{case_id}"
     image_path = INPUT_DIR / f"{case_id}{ext}"
     image_path.write_bytes(content)
-    return image_path, case_id
+    return image_path, case_id, original_name, output_folder
+
+
+def copy_original_to_output(image_path: Path, out_dir: Path, original_name: str | None = None) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if original_name:
+        safe_name = sanitize_name(Path(original_name).stem)
+    else:
+        safe_name = sanitize_name(image_path.stem)
+
+    dst = out_dir / f"00_original__{safe_name}.png"
+    img = imread_unicode(image_path, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        raise FileNotFoundError(f"无法读取原图用于PNG转换: {image_path}")
+    ok, encoded = cv2.imencode(".png", img)
+    if not ok:
+        raise RuntimeError(f"无法将原图编码为PNG: {image_path}")
+    encoded.tofile(str(dst))
+    return dst
 
 
 def pick_existing_path(candidates: List[Path]) -> Path | None:
@@ -289,6 +317,8 @@ def resolve_presence_thresholds(
 def run_heatmap_and_worst(
     image_path: Path,
     case_id: str,
+    output_folder: str,
+    original_name: str | None,
     model_path: Path,
     target_class: int,
     fixed_radius: int | None,
@@ -303,8 +333,9 @@ def run_heatmap_and_worst(
     min_overlap: float,
     device: str,
 ) -> dict:
-    out_dir = OUTPUT_DIR / case_id
+    out_dir = OUTPUT_DIR / output_folder
     out_dir.mkdir(parents=True, exist_ok=True)
+    original_copy = copy_original_to_output(image_path, out_dir, original_name)
 
     texture_path = PROJECT_ROOT / "skin_output" / f"only_texture_line_{case_id}.png"
     if not texture_path.exists():
@@ -394,16 +425,25 @@ def run_heatmap_and_worst(
         "radius": result["radius"],
         "box_size": used_box_size,
         "out_dir": out_dir,
+        "original_copy": original_copy,
         "presence_mode": presence_mode,
         "presence_cuts": used_cuts,
         "presence_thresholds": presence_thresholds,
     }
 
 
-def run_full_pipeline(image_path: Path, case_id: str, model_path: Path, device: str) -> dict:
+def run_full_pipeline(
+    image_path: Path,
+    case_id: str,
+    output_folder: str,
+    original_name: str | None,
+    model_path: Path,
+    device: str,
+) -> dict:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    out_dir = OUTPUT_DIR / case_id
+    out_dir = OUTPUT_DIR / output_folder
     out_dir.mkdir(parents=True, exist_ok=True)
+    original_copy = copy_original_to_output(image_path, out_dir, original_name)
 
     pred = predict_mask(str(image_path), str(model_path), device)
     original = imread_unicode(image_path, cv2.IMREAD_COLOR)
@@ -429,6 +469,7 @@ def run_full_pipeline(image_path: Path, case_id: str, model_path: Path, device: 
 
     return {
         "out_dir": out_dir,
+        "original_copy": original_copy,
         "texture_only": texture_path,
         "texture_compare": PROJECT_ROOT / "skin_output" / f"texture_line_{case_id}.png",
         "orientation_only": orientation_only,
@@ -632,10 +673,10 @@ def app():
     num_boxes = st.sidebar.slider(
         "框数量",
         min_value=1,
-        max_value=3,
+        max_value=5,
         value=1,
         step=1,
-        help="输出几个不重叠的高严重度区域框。",
+        help="输出几个不重叠的高严重度区域框（1~5）。",
     )
     min_overlap = st.sidebar.slider(
         "最小mask覆盖率",
@@ -667,12 +708,19 @@ def app():
         st.session_state["image_path"] = None
     if "case_id" not in st.session_state:
         st.session_state["case_id"] = None
+    if "original_name" not in st.session_state:
+        st.session_state["original_name"] = None
+    if "output_folder" not in st.session_state:
+        st.session_state["output_folder"] = None
 
     if uploaded is not None:
-        image_path, case_id = save_uploaded_file(uploaded)
+        image_path, case_id, original_name, output_folder = save_uploaded_file(uploaded)
         st.session_state["image_path"] = str(image_path)
         st.session_state["case_id"] = case_id
+        st.session_state["original_name"] = original_name
+        st.session_state["output_folder"] = output_folder
         st.info(f"当前样本ID: {case_id}")
+        st.caption(f"输出目录: web_demo_output/{output_folder}")
 
     if run_all:
         if st.session_state["image_path"] is None:
@@ -685,10 +733,14 @@ def app():
         with st.spinner("正在生成全流程中间结果..."):
             image_path = Path(st.session_state["image_path"])
             case_id = st.session_state["case_id"]
-            full_info = run_full_pipeline(image_path, case_id, model_path, device)
+            output_folder = st.session_state["output_folder"] or case_id
+            original_name = st.session_state["original_name"]
+            full_info = run_full_pipeline(image_path, case_id, output_folder, original_name, model_path, device)
             heat_info = run_heatmap_and_worst(
                 image_path=image_path,
                 case_id=case_id,
+                output_folder=output_folder,
+                original_name=original_name,
                 model_path=model_path,
                 target_class=target_class,
                 fixed_radius=fixed_radius,
@@ -723,9 +775,13 @@ def app():
         with st.spinner("正在按新参数重算热图和最严重框..."):
             image_path = Path(st.session_state["image_path"])
             case_id = st.session_state["case_id"]
+            output_folder = st.session_state["output_folder"] or case_id
+            original_name = st.session_state["original_name"]
             heat_info = run_heatmap_and_worst(
                 image_path=image_path,
                 case_id=case_id,
+                output_folder=output_folder,
+                original_name=original_name,
                 model_path=model_path,
                 target_class=target_class,
                 fixed_radius=fixed_radius,
@@ -751,7 +807,9 @@ def app():
 
     if st.session_state["case_id"] is not None:
         case_id = st.session_state["case_id"]
-        out_dir = OUTPUT_DIR / case_id
+        output_folder = st.session_state.get("output_folder") or case_id
+        out_dir = OUTPUT_DIR / output_folder
+        st.caption(f"当前输出目录: web_demo_output/{output_folder}")
         try:
             orientation_only_show = resolve_predict_output(case_id, "orientation_only_texture_line_")
         except Exception:
@@ -766,6 +824,13 @@ def app():
             sector_vis_show = PROJECT_ROOT / "predict_output" / f"spatial_sector_directions_{case_id}.png"
 
         st.subheader("中间结果总览")
+        copied_original = sorted(out_dir.glob("00_original__*"), key=lambda p: p.stat().st_mtime)
+        if copied_original:
+            show_image_with_explain(
+                copied_original[-1],
+                "原图（已复制到输出目录）",
+                "这是上传原图在 web_demo_output 中的副本，便于后续查阅与结果对照。",
+            )
         show_image_with_explain(
             out_dir / "segmentation_overlay.png",
             "分割叠加图",
@@ -835,7 +900,7 @@ def app():
             show_image_with_explain(
                 worst_box_img[-1],
                 "最严重框",
-                "在目标区域内筛选出的高严重度框，支持1~3个不重叠框。",
+                "在目标区域内筛选出的高严重度框，支持1~5个不重叠框。",
             )
         if worst_dir_img:
             show_image_with_explain(
