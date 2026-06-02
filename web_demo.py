@@ -457,6 +457,26 @@ def show_image_with_explain(path: Path, title: str, explain: str):
 
 def app():
     st.set_page_config(page_title="皮肤纹理方向分析 Demo", layout="wide")
+
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stSidebarUserContent"] .floating-actions {
+            position: sticky;
+            top: 0.5rem;
+            z-index: 999;
+            background: rgba(255, 255, 255, 0.96);
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 10px;
+            margin-bottom: 10px;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     st.title("皮肤纹理方向分析 Demo")
     st.caption("上传图片 -> 生成全流程中间结果 -> 调参重算热图/Presence/最严重框")
 
@@ -636,9 +656,12 @@ def app():
             "- Box参数：控制最严重框的大小、数量和有效区域约束。"
         )
 
-    col_run = st.columns([1, 1, 3])
-    run_all = col_run[0].button("1) 生成全流程", help="首次运行建议点击，生成全部中间结果与可视化。")
-    rerun_part = col_run[1].button("2) 仅重算热图/框", help="不重跑分割和方向，仅按当前参数更新热图与最严重框。")
+    st.sidebar.markdown('<div class="floating-actions">', unsafe_allow_html=True)
+    st.sidebar.subheader("运行按钮")
+    run_all = st.sidebar.button("1) 生成全流程", help="首次运行建议点击，生成全部中间结果与可视化。")
+    rerun_part = st.sidebar.button("2) 仅重算热图/框", help="不重跑分割和方向，仅按当前参数更新热图与最严重框。")
+    st.sidebar.caption("滚动页面时该按钮区会固定显示。")
+    st.sidebar.markdown("</div>", unsafe_allow_html=True)
 
     if "image_path" not in st.session_state:
         st.session_state["image_path"] = None
