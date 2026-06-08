@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
+import json
 import re
 import shutil
 from pathlib import Path
@@ -15,6 +17,7 @@ except Exception as exc:  # pragma: no cover
 import numpy as np
 import streamlit as st
 import torch
+import matplotlib.cm as cm
 
 from skin import analyze_skin_texture
 from predict import analyze_texture_orientation
@@ -31,15 +34,198 @@ from src.local_score_heatmap import (
 from src.run_one_full_pipeline import overlay_images_unicode
 from src.worst_box_direction import (
     draw_outputs,
+    extract_connected_high_area,
     find_worst_box,
     mean_orientation_degrees,
     scaled_box_size_from_shape,
 )
+import src.worst_box_direction as worst_box_direction_module
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 INPUT_DIR = PROJECT_ROOT / "web_demo_inputs"
 OUTPUT_DIR = PROJECT_ROOT / "web_demo_output"
+
+PARAM_DEFAULTS = {
+    "model_rel": "best_trans_unet_model_20250614_122913.pth",
+    "target_class": 1,
+    "radius_mode": "动态",
+    "fixed_radius": 40,
+    "texture_threshold": 0.40,
+    "density_weight": 0.70,
+    "consistency_weight": 0.30,
+    "heat_alpha": 0.55,
+    "n_bins": 4,
+    "presence_mode": "threshold",
+    "presence_cuts": [0.25, 0.50, 0.75],
+    "box_mode": "固定",
+    "box_size": 80,
+    "num_boxes": 1,
+    "min_overlap": 0.30,
+}
+
+
+def _clamp_int(v: int, lo: int, hi: int) -> int:
+    return int(max(lo, min(hi, int(v))))
+
+
+def _clamp_float(v: float, lo: float, hi: float) -> float:
+    return float(max(lo, min(hi, float(v))))
+
+
+def _normalize_presence_cuts(cuts: list[float], n_bins: int, mode: str) -> list[float]:
+    needed = max(0, int(n_bins) - 1)
+    cleaned = []
+    for c in cuts:
+        if mode == "threshold":
+            cleaned.append(_clamp_float(c, 0.0, 1.0))
+        else:
+            cleaned.append(_clamp_float(c, 0.0, 100.0))
+    cleaned = sorted(cleaned)
+    if len(cleaned) >= needed:
+        return cleaned[:needed]
+
+    for i in range(len(cleaned), needed):
+        if mode == "threshold":
+            cleaned.append(float((i + 1) / max(1, n_bins)))
+        else:
+            cleaned.append(float((i + 1) * 100.0 / max(1, n_bins)))
+    return sorted(cleaned)
+
+
+def normalize_params_dict(raw_data: dict) -> dict:
+    data = dict(PARAM_DEFAULTS)
+    if isinstance(raw_data, dict):
+        data.update(raw_data)
+
+    data["target_class"] = 1 if int(data.get("target_class", 1)) != 2 else 2
+    data["radius_mode"] = "固定" if data.get("radius_mode") == "固定" else "动态"
+    data["box_mode"] = "固定" if data.get("box_mode") == "固定" else "动态"
+    data["presence_mode"] = "quantile" if data.get("presence_mode") == "quantile" else "threshold"
+    data["fixed_radius"] = _clamp_int(int(data.get("fixed_radius", 40)), 8, 120)
+    data["texture_threshold"] = _clamp_float(float(data.get("texture_threshold", 0.40)), 0.05, 0.95)
+    data["density_weight"] = _clamp_float(float(data.get("density_weight", 0.70)), 0.0, 1.0)
+    data["consistency_weight"] = _clamp_float(float(data.get("consistency_weight", 0.30)), 0.0, 1.0)
+    data["heat_alpha"] = _clamp_float(float(data.get("heat_alpha", 0.55)), 0.1, 0.9)
+    data["n_bins"] = _clamp_int(int(data.get("n_bins", 4)), 2, 6)
+    data["box_size"] = _clamp_int(int(data.get("box_size", 80)), 24, 240)
+    data["num_boxes"] = _clamp_int(int(data.get("num_boxes", 1)), 1, 5)
+    data["min_overlap"] = _clamp_float(float(data.get("min_overlap", 0.30)), 0.0, 0.95)
+
+    raw_cuts = data.get("presence_cuts", PARAM_DEFAULTS["presence_cuts"])
+    if not isinstance(raw_cuts, list):
+        raw_cuts = PARAM_DEFAULTS["presence_cuts"]
+    data["presence_cuts"] = _normalize_presence_cuts(raw_cuts, data["n_bins"], data["presence_mode"])
+    return data
+
+
+def apply_params_to_session(params: dict) -> None:
+    st.session_state["p_model_rel"] = str(params["model_rel"])
+    st.session_state["p_target_class"] = int(params["target_class"])
+    st.session_state["p_radius_mode"] = str(params["radius_mode"])
+    st.session_state["p_fixed_radius"] = int(params["fixed_radius"])
+    st.session_state["p_texture_threshold"] = float(params["texture_threshold"])
+    st.session_state["p_density_weight"] = float(params["density_weight"])
+    st.session_state["p_consistency_weight"] = float(params["consistency_weight"])
+    st.session_state["p_heat_alpha"] = float(params["heat_alpha"])
+    st.session_state["p_n_bins"] = int(params["n_bins"])
+    st.session_state["p_presence_mode"] = str(params["presence_mode"])
+    st.session_state["p_box_mode"] = str(params["box_mode"])
+    st.session_state["p_box_size"] = int(params["box_size"])
+    st.session_state["p_num_boxes"] = int(params["num_boxes"])
+    st.session_state["p_min_overlap"] = float(params["min_overlap"])
+
+    cuts = params["presence_cuts"]
+    for i in range(5):
+        key = f"p_presence_cut_{i}"
+        if i < len(cuts):
+            st.session_state[key] = float(cuts[i])
+        elif key not in st.session_state:
+            st.session_state[key] = 0.0
+
+
+def load_params_from_output_dir(out_dir: Path) -> dict | None:
+    params_path = out_dir / "run_params.json"
+    if not params_path.exists():
+        return None
+    try:
+        raw = json.loads(params_path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return None
+        return normalize_params_dict(raw)
+    except Exception:
+        return None
+
+
+def init_params_state_once() -> None:
+    if st.session_state.get("_params_initialized"):
+        return
+
+    params = normalize_params_dict(PARAM_DEFAULTS)
+    apply_params_to_session(params)
+
+    st.session_state["_params_initialized"] = True
+
+
+def build_current_params_snapshot(
+    model_rel: str,
+    target_class: int,
+    radius_mode: str,
+    fixed_radius: int | None,
+    texture_threshold: float,
+    density_weight: float,
+    consistency_weight: float,
+    heat_alpha: float,
+    n_bins: int,
+    presence_mode: str,
+    presence_cuts: list[float],
+    box_mode: str,
+    box_size: int | None,
+    num_boxes: int,
+    min_overlap: float,
+) -> dict:
+    snapshot = {
+        "model_rel": str(model_rel),
+        "target_class": int(target_class),
+        "radius_mode": str(radius_mode),
+        "fixed_radius": int(fixed_radius) if fixed_radius is not None else int(st.session_state.get("p_fixed_radius", 40)),
+        "texture_threshold": float(texture_threshold),
+        "density_weight": float(density_weight),
+        "consistency_weight": float(consistency_weight),
+        "heat_alpha": float(heat_alpha),
+        "n_bins": int(n_bins),
+        "presence_mode": str(presence_mode),
+        "presence_cuts": [float(v) for v in presence_cuts],
+        "box_mode": str(box_mode),
+        "box_size": int(box_size) if box_size is not None else int(st.session_state.get("p_box_size", 80)),
+        "num_boxes": int(num_boxes),
+        "min_overlap": float(min_overlap),
+    }
+    snapshot["presence_cuts"] = _normalize_presence_cuts(snapshot["presence_cuts"], snapshot["n_bins"], snapshot["presence_mode"])
+    return snapshot
+
+
+def save_params_to_output_dir(
+    out_dir: Path,
+    input_image_path: Path,
+    params_snapshot: dict,
+    heat_info: dict,
+) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    payload = dict(params_snapshot)
+    payload["input_image"] = str(input_image_path)
+    payload["output_dir"] = str(out_dir)
+    payload["radius_used"] = int(heat_info.get("radius", payload.get("fixed_radius", 0)))
+    payload["box_size_used"] = int(heat_info.get("box_size", payload.get("box_size", 0)))
+    payload["presence_mode_used"] = str(heat_info.get("presence_mode", payload.get("presence_mode", "threshold")))
+    payload["presence_cuts_used"] = [float(v) for v in heat_info.get("presence_cuts", payload.get("presence_cuts", []))]
+    payload["presence_thresholds_used"] = [float(v) for v in heat_info.get("presence_thresholds", [])]
+    if "area_threshold_p80" in heat_info:
+        payload["area_threshold_p80"] = float(heat_info["area_threshold_p80"])
+
+    out_path = out_dir / "run_params.json"
+    out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return out_path
 
 
 def sanitize_name(name: str) -> str:
@@ -116,7 +302,11 @@ def resolve_predict_output(case_id: str, prefix: str) -> Path:
     raise FileNotFoundError(f"未找到预测输出: {prefix}{case_id}.png (或兼容后缀 {suffix})")
 
 
-def make_segmentation_visuals(original_bgr: np.ndarray, pred: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def make_segmentation_visuals(
+    original_bgr: np.ndarray,
+    pred: np.ndarray,
+    region_boundary_mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     h, w = original_bgr.shape[:2]
     if pred.shape[:2] != (h, w):
         pred = cv2.resize(pred.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
@@ -124,23 +314,61 @@ def make_segmentation_visuals(original_bgr: np.ndarray, pred: np.ndarray) -> tup
     rgb = cv2.cvtColor(original_bgr, cv2.COLOR_BGR2RGB)
     filled = np.zeros_like(rgb, dtype=np.uint8)
     # class 0/1/2 colors in RGB
-    filled[pred == 0] = [70, 130, 255]
-    filled[pred == 1] = [80, 220, 120]
-    filled[pred == 2] = [255, 110, 90]
+    bg_color = [70, 130, 255]
+    outer_color = [80, 220, 120]
+    inner_color = [255, 110, 90]
+    filled[:, :] = bg_color
 
     boundary = np.zeros_like(rgb, dtype=np.uint8)
-    for class_id, color in [(2, (255, 0, 0)), (1, (0, 255, 0))]:
-        binary = (pred == class_id).astype(np.uint8)
-        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(boundary, contours, -1, color, 2)
+    mask_u8 = None
+    hole_mask = np.zeros((h, w), dtype=np.uint8)
+    if region_boundary_mask is not None:
+        mask_u8 = (region_boundary_mask > 0).astype(np.uint8)
+        if mask_u8.shape[:2] != (h, w):
+            mask_u8 = cv2.resize(mask_u8, (w, h), interpolation=cv2.INTER_NEAREST)
+        # Use region-mask contour hierarchy so boundary rings match severity_map exactly:
+        # outer boundary -> green, inner hole boundaries -> red.
+        contours, hierarchy = cv2.findContours(mask_u8, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+        if hierarchy is not None:
+            hier = hierarchy[0]
+            for i, cnt in enumerate(contours):
+                parent = hier[i][3]
+                color = (0, 255, 0) if parent == -1 else (255, 0, 0)
+                cv2.drawContours(boundary, [cnt], -1, color, 2)
+                if parent != -1:
+                    cv2.drawContours(hole_mask, [cnt], -1, 1, thickness=-1)
+        else:
+            # Fallback: if no hierarchy is available, draw only outer boundary.
+            contours_ext, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(boundary, contours_ext, -1, (0, 255, 0), 2)
+
+        # Fill segmentation by region-mask geometry (not raw pred class1/class2).
+        filled[mask_u8 > 0] = outer_color
+        filled[hole_mask > 0] = inner_color
+    else:
+        filled[pred == 0] = bg_color
+        filled[pred == 1] = outer_color
+        filled[pred == 2] = inner_color
+        for class_id, color in [(2, (255, 0, 0)), (1, (0, 255, 0))]:
+            binary = (pred == class_id).astype(np.uint8)
+            contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(boundary, contours, -1, color, 2)
 
     alpha_map = np.zeros((h, w), dtype=np.float32)
-    alpha_map[pred == 0] = 0.12
-    alpha_map[pred == 1] = 0.28
-    alpha_map[pred == 2] = 0.40
+    if mask_u8 is not None:
+        alpha_map[:, :] = 0.12
+        alpha_map[mask_u8 > 0] = 0.28
+        alpha_map[hole_mask > 0] = 0.40
+    else:
+        alpha_map[pred == 0] = 0.12
+        alpha_map[pred == 1] = 0.28
+        alpha_map[pred == 2] = 0.40
     overlay = rgb.astype(np.float32).copy()
     for c in range(3):
         overlay[:, :, c] = (1.0 - alpha_map) * overlay[:, :, c] + alpha_map * filled[:, :, c]
+
+    # Apply the same boundary styling to the filled view for visual consistency.
+    filled = cv2.addWeighted(filled.astype(np.uint8), 1.0, boundary, 0.85, 0)
     overlay = cv2.addWeighted(overlay.astype(np.uint8), 1.0, boundary, 0.75, 0)
     return filled, boundary, overlay
 
@@ -222,6 +450,47 @@ def compute_score_map_custom(
         "score_norm": score_norm,
         "radius": radius,
     }
+
+
+def add_vertical_colorbar_bgr(
+    image_bgr: np.ndarray,
+    bar_width: int = 28,
+    pad: int = 10,
+    margin: int = 12,
+) -> np.ndarray:
+    """Append a right-side vertical colorbar for normalized severity [0, 1]."""
+    h, w = image_bgr.shape[:2]
+    canvas_w = w + pad + bar_width + 56
+    canvas = np.full((h, canvas_w, 3), 255, dtype=np.uint8)
+    canvas[:, :w] = image_bgr
+
+    y = np.linspace(1.0, 0.0, h, dtype=np.float32)[:, None]
+    cmap_rgb = (cv2.applyColorMap((y * 255).astype(np.uint8), cv2.COLORMAP_JET))
+    bar = np.repeat(cmap_rgb, bar_width, axis=1)
+
+    x0 = w + pad
+    x1 = x0 + bar_width
+    canvas[:, x0:x1] = bar
+    cv2.rectangle(canvas, (x0, 0), (x1 - 1, h - 1), (0, 0, 0), 1)
+
+    ticks = [1.0, 0.75, 0.50, 0.25, 0.0]
+    for t in ticks:
+        yy = int(round((1.0 - t) * (h - 1)))
+        cv2.line(canvas, (x1 + 2, yy), (x1 + 10, yy), (0, 0, 0), 1)
+        label = f"{t:.2f}" if t not in (1.0, 0.0) else f"{t:.1f}"
+        cv2.putText(
+            canvas,
+            label,
+            (x1 + 14, min(max(yy + 4, margin), h - margin)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (0, 0, 0),
+            1,
+            cv2.LINE_AA,
+        )
+
+    cv2.putText(canvas, "Severity", (x0 - 2, margin), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (0, 0, 0), 1, cv2.LINE_AA)
+    return canvas
 
 
 def build_presence_map_custom(
@@ -314,6 +583,50 @@ def resolve_presence_thresholds(
     return thresholds, used_cuts
 
 
+def add_colorbar_right_bgr(
+    image_bgr: np.ndarray,
+    vmin: float = 0.0,
+    vmax: float = 1.0,
+    bar_width: int = 26,
+    pad: int = 10,
+) -> np.ndarray:
+    """Append a vertical jet color bar to the right side of an image (BGR)."""
+    h, w = image_bgr.shape[:2]
+
+    # Build top(high)->bottom(low) gradient and convert from RGB to BGR.
+    grad = np.linspace(vmax, vmin, h, dtype=np.float32)[:, None]
+    bar_rgb = (cm.get_cmap("jet")(grad)[:, :, :3] * 255).astype(np.uint8)
+    bar_rgb = np.repeat(bar_rgb, bar_width, axis=1)
+    bar_bgr = cv2.cvtColor(bar_rgb, cv2.COLOR_RGB2BGR)
+
+    canvas_w = w + pad * 3 + bar_width + 44
+    canvas = np.full((h, canvas_w, 3), 255, dtype=np.uint8)
+    canvas[:, :w] = image_bgr
+
+    x0 = w + pad
+    x1 = x0 + bar_width
+    canvas[:, x0:x1] = bar_bgr
+
+    # Draw border and ticks.
+    cv2.rectangle(canvas, (x0, 0), (x1 - 1, h - 1), (0, 0, 0), 1)
+    ticks = [0.0, 0.25, 0.5, 0.75, 1.0]
+    for t in ticks:
+        y = int(round((1.0 - t) * (h - 1)))
+        cv2.line(canvas, (x1 + 2, y), (x1 + 8, y), (0, 0, 0), 1)
+        cv2.putText(
+            canvas,
+            f"{t:.2f}",
+            (x1 + 12, max(10, min(h - 4, y + 4))),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            (0, 0, 0),
+            1,
+            cv2.LINE_AA,
+        )
+
+    return canvas
+
+
 def run_heatmap_and_worst(
     image_path: Path,
     case_id: str,
@@ -363,6 +676,10 @@ def run_heatmap_and_worst(
     heatmap_bgr = cv2.cvtColor(heatmap_rgb, cv2.COLOR_RGB2BGR)
     severity_overlay = overlay_heatmap(original, heatmap_bgr, result["region_mask"], alpha=heat_alpha)
 
+    # Add right-side color bars for readability.
+    heatmap_bgr_with_bar = add_colorbar_right_bgr(heatmap_bgr, vmin=0.0, vmax=1.0)
+    severity_overlay_with_bar = add_colorbar_right_bgr(severity_overlay, vmin=0.0, vmax=1.0)
+
     presence_thresholds, used_cuts = resolve_presence_thresholds(
         result["score_norm"],
         result["region_mask"],
@@ -379,8 +696,8 @@ def run_heatmap_and_worst(
         presence_overlay[:, :, c][inside] = 0.50 * presence_overlay[:, :, c][inside] + 0.50 * presence_map[:, :, c][inside]
     presence_overlay = np.clip(presence_overlay, 0, 255).astype(np.uint8)
 
-    cv2.imwrite(str(out_dir / "severity_map.png"), heatmap_bgr)
-    cv2.imwrite(str(out_dir / "severity_overlay.png"), severity_overlay)
+    cv2.imwrite(str(out_dir / "severity_map.png"), heatmap_bgr_with_bar)
+    cv2.imwrite(str(out_dir / "severity_overlay.png"), severity_overlay_with_bar)
     cv2.imwrite(str(out_dir / "presence_map.png"), presence_map)
     cv2.imwrite(str(out_dir / "presence_overlay.png"), presence_overlay)
 
@@ -392,33 +709,61 @@ def run_heatmap_and_worst(
     boxes = []
     means = []
     forbidden = []
+    area_masks = []
+    seed_points = []
+    forbidden_area = np.zeros_like(result["region_mask"], dtype=np.uint8)
+    vals_inside = result["score_norm"][result["region_mask"] > 0]
+    area_threshold = float(np.quantile(vals_inside, 0.80)) if vals_inside.size > 0 else 0.0
     for _ in range(num_boxes):
-        box = find_worst_box(
-            result["score_norm"],
-            result["region_mask"],
-            box_size=used_box_size,
-            min_overlap_ratio=min_overlap,
-            forbidden_boxes=forbidden,
-        )
+        try:
+            box = find_worst_box(
+                result["score_norm"],
+                result["region_mask"],
+                box_size=used_box_size,
+                min_overlap_ratio=min_overlap,
+                forbidden_boxes=forbidden,
+                forbidden_area_mask=forbidden_area,
+            )
+        except RuntimeError:
+            break
         boxes.append(box)
         means.append(mean_orientation_degrees(result["orientations"], result["region_mask"], box))
         forbidden.append(box)
+        area_mask, seed_pt, _ = extract_connected_high_area(
+            result["score_norm"],
+            result["region_mask"],
+            box,
+            area_threshold,
+        )
+        area_masks.append(area_mask)
+        seed_points.append(seed_pt)
+        forbidden_area[area_mask > 0] = 1
+
+    if len(boxes) == 0:
+        raise RuntimeError("在联通区域约束下未找到可用最严重框，请调整参数后重试。")
 
     # Remove stale worst-box artifacts so UI always reflects the current run.
     for stale in out_dir.glob(f"{image_path.stem}_worst*_box.png"):
         stale.unlink(missing_ok=True)
     for stale in out_dir.glob(f"{image_path.stem}_worst*_direction.png"):
         stale.unlink(missing_ok=True)
+    for stale in out_dir.glob(f"{image_path.stem}_worst*_area.png"):
+        stale.unlink(missing_ok=True)
     for stale in out_dir.glob(f"{image_path.stem}_worst*_info.txt"):
         stale.unlink(missing_ok=True)
 
-    draw_outputs(
+    importlib.reload(worst_box_direction_module)
+    worst_box_direction_module.draw_outputs(
         image_path=image_path,
         out_dir=out_dir,
         box_size=used_box_size,
         boxes=boxes,
         mean_degs=means,
         pred=result["pred"],
+        region_mask=result["region_mask"],
+        area_masks=area_masks,
+        seed_points=seed_points,
+        area_threshold=area_threshold,
     )
 
     return {
@@ -429,6 +774,7 @@ def run_heatmap_and_worst(
         "presence_mode": presence_mode,
         "presence_cuts": used_cuts,
         "presence_thresholds": presence_thresholds,
+        "area_threshold_p80": area_threshold,
     }
 
 
@@ -449,7 +795,12 @@ def run_full_pipeline(
     original = imread_unicode(image_path, cv2.IMREAD_COLOR)
     if original is None:
         raise FileNotFoundError(f"无法读取原图: {image_path}")
-    filled, boundary, seg_overlay = make_segmentation_visuals(original, pred)
+    region_mask_for_boundary = build_effective_texture_region_mask((pred == 1).astype(np.uint8))
+    filled, boundary, seg_overlay = make_segmentation_visuals(
+        original,
+        pred,
+        region_boundary_mask=region_mask_for_boundary,
+    )
     cv2.imwrite(str(out_dir / "segmentation_filled.png"), cv2.cvtColor(filled, cv2.COLOR_RGB2BGR))
     cv2.imwrite(str(out_dir / "segmentation_boundary.png"), cv2.cvtColor(boundary, cv2.COLOR_RGB2BGR))
     cv2.imwrite(str(out_dir / "segmentation_overlay.png"), cv2.cvtColor(seg_overlay, cv2.COLOR_RGB2BGR))
@@ -532,12 +883,20 @@ def app():
             st.text(f"OpenCV 导入错误: {_CV2_IMPORT_ERROR}")
         st.stop()
 
+    init_params_state_once()
+
+    # Apply per-image params before widgets are instantiated to avoid Streamlit key mutation errors.
+    pending_params = st.session_state.get("_pending_params_to_apply")
+    if isinstance(pending_params, dict):
+        apply_params_to_session(normalize_params_dict(pending_params))
+        st.session_state["_pending_params_to_apply"] = None
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     st.sidebar.markdown(f"**设备**: {device}")
 
     model_rel = st.sidebar.text_input(
         "模型文件",
-        value="best_trans_unet_model_20250614_122913.pth",
+        key="p_model_rel",
         help="用于分割预测的模型权重文件路径（相对项目根目录）。",
     )
     model_path = (PROJECT_ROOT / model_rel).resolve()
@@ -550,142 +909,190 @@ def app():
         help="上传待分析图片。系统会生成分割、纹理、方向、热图和最严重框等中间结果。",
     )
 
+    if "image_path" not in st.session_state:
+        st.session_state["image_path"] = None
+    if "case_id" not in st.session_state:
+        st.session_state["case_id"] = None
+    if "original_name" not in st.session_state:
+        st.session_state["original_name"] = None
+    if "output_folder" not in st.session_state:
+        st.session_state["output_folder"] = None
+    if "image_size_text" not in st.session_state:
+        st.session_state["image_size_text"] = None
+    if "_params_loaded_for_output_folder" not in st.session_state:
+        st.session_state["_params_loaded_for_output_folder"] = None
+    if "_pending_params_to_apply" not in st.session_state:
+        st.session_state["_pending_params_to_apply"] = None
+
+    if uploaded is not None:
+        image_path, case_id, original_name, output_folder = save_uploaded_file(uploaded)
+        st.session_state["image_path"] = str(image_path)
+        st.session_state["case_id"] = case_id
+        st.session_state["original_name"] = original_name
+        st.session_state["output_folder"] = output_folder
+
+        original_for_size = imread_unicode(image_path, cv2.IMREAD_COLOR)
+        if original_for_size is not None:
+            h, w = original_for_size.shape[:2]
+            st.session_state["image_size_text"] = f"{w}×{h} 像素"
+        else:
+            st.session_state["image_size_text"] = "读取失败"
+
+    current_output_folder = st.session_state.get("output_folder")
+    if current_output_folder and st.session_state.get("_params_loaded_for_output_folder") != current_output_folder:
+        out_dir = OUTPUT_DIR / current_output_folder
+        loaded_params = load_params_from_output_dir(out_dir)
+        if loaded_params is None:
+            loaded_params = normalize_params_dict(PARAM_DEFAULTS)
+        st.session_state["_pending_params_to_apply"] = loaded_params
+        st.session_state["_params_loaded_for_output_folder"] = current_output_folder
+        st.rerun()
+
     st.sidebar.header("热图参数")
     target_class = st.sidebar.selectbox(
         "目标类别",
         options=[1, 2],
-        index=0,
+        key="p_target_class",
         help="选择做局部评分的区域类别。1通常为有效病灶区域，2通常为更核心区域。",
     )
     radius_mode = st.sidebar.selectbox(
         "Radius模式",
         options=["动态", "固定"],
-        index=1,
+        key="p_radius_mode",
         help="动态：按图像大小自动设半径；固定：使用你指定的像素半径。",
     )
     fixed_radius = None
     if radius_mode == "固定":
-        fixed_radius = st.sidebar.slider(
+        fixed_radius = st.sidebar.number_input(
             "Heatmap Radius",
             min_value=8,
             max_value=120,
-            value=40,
             step=1,
+            key="p_fixed_radius",
             help="局部统计窗口半径（像素）。越大越平滑，越小越敏感。",
         )
 
-    texture_threshold = st.sidebar.slider(
+    texture_threshold = st.sidebar.number_input(
         "纹理像素阈值",
         min_value=0.05,
         max_value=0.95,
-        value=0.40,
         step=0.01,
+        format="%.2f",
+        key="p_texture_threshold",
         help="将纹理图像素判定为纹理点的阈值。阈值越高，识别到的纹理点越少。",
     )
-    density_weight = st.sidebar.slider(
+    density_weight = st.sidebar.number_input(
         "密度权重",
         min_value=0.0,
         max_value=1.0,
-        value=0.70,
         step=0.05,
+        format="%.2f",
+        key="p_density_weight",
         help="严重度评分中“纹理密度”项的权重。",
     )
-    consistency_weight = st.sidebar.slider(
+    consistency_weight = st.sidebar.number_input(
         "一致性权重",
         min_value=0.0,
         max_value=1.0,
-        value=0.30,
         step=0.05,
+        format="%.2f",
+        key="p_consistency_weight",
         help="严重度评分中“方向一致性”项的权重。",
     )
-    heat_alpha = st.sidebar.slider(
+    heat_alpha = st.sidebar.number_input(
         "热图叠加透明度",
         min_value=0.1,
         max_value=0.9,
-        value=0.55,
         step=0.05,
+        format="%.2f",
+        key="p_heat_alpha",
         help="Severity Overlay 中热图颜色叠加到原图的强度。",
     )
 
     st.sidebar.header("Presence参数")
-    n_bins = st.sidebar.slider(
+    n_bins = st.sidebar.number_input(
         "Presence分级数",
         min_value=2,
         max_value=6,
-        value=4,
         step=1,
+        key="p_n_bins",
         help="Presence Map 分成多少档颜色等级。",
     )
+    n_bins = int(n_bins)
     presence_mode = st.sidebar.selectbox(
         "Presence划分模式",
         options=["threshold", "quantile"],
-        index=0,
+        key="p_presence_mode",
         help="threshold：按固定阈值切分；quantile：按分位数切分。",
     )
     presence_cuts = []
     if presence_mode == "threshold":
         st.sidebar.caption("阈值模式：每个划分线是0~1范围，按归一化分数直接切分")
         for i in range(n_bins - 1):
-            default_v = float((i + 1) / n_bins)
-            v = st.sidebar.slider(
+            v = st.sidebar.number_input(
                 f"阈值线{i + 1}",
                 min_value=0.0,
                 max_value=1.0,
-                value=default_v,
                 step=0.01,
-                key=f"presence_threshold_{i}",
+                format="%.2f",
+                key=f"p_presence_cut_{i}",
                 help="第{i}到第{i+1}档的分界阈值（0~1）。",
             )
             presence_cuts.append(v)
     else:
         st.sidebar.caption("分位模式：每个划分线是0~100分位，按mask内分数分布切分")
         for i in range(n_bins - 1):
-            default_q = float((i + 1) * 100.0 / n_bins)
-            q = st.sidebar.slider(
+            q = st.sidebar.number_input(
                 f"分位线{i + 1} (%)",
                 min_value=0.0,
                 max_value=100.0,
-                value=default_q,
                 step=1.0,
-                key=f"presence_quantile_{i}",
+                format="%.1f",
+                key=f"p_presence_cut_{i}",
                 help="第{i}到第{i+1}档的分界分位点（0~100%）。",
             )
             presence_cuts.append(q)
-    presence_cuts = sorted(presence_cuts)
+    presence_cuts = _normalize_presence_cuts([float(v) for v in presence_cuts], n_bins, presence_mode)
 
     st.sidebar.header("最严重框参数")
     box_mode = st.sidebar.selectbox(
         "Box Size模式",
         options=["动态", "固定"],
-        index=1,
+        key="p_box_mode",
         help="动态：按图像大小自动设框边长；固定：使用你指定的框大小。",
     )
     box_size = None
     if box_mode == "固定":
-        box_size = st.sidebar.slider(
+        box_size = st.sidebar.number_input(
             "Box Size",
             min_value=24,
             max_value=240,
-            value=80,
             step=2,
+            key="p_box_size",
             help="最严重框的边长（像素）。",
         )
-    num_boxes = st.sidebar.slider(
+    num_boxes = st.sidebar.number_input(
         "框数量",
         min_value=1,
         max_value=5,
-        value=1,
         step=1,
+        key="p_num_boxes",
         help="输出几个不重叠的高严重度区域框（1~5）。",
     )
-    min_overlap = st.sidebar.slider(
+    min_overlap = st.sidebar.number_input(
         "最小mask覆盖率",
         min_value=0.0,
         max_value=0.95,
-        value=0.30,
         step=0.01,
+        format="%.2f",
+        key="p_min_overlap",
         help="候选框中有效区域像素占比下限。值越大，框越集中在目标区域内。",
     )
+    num_boxes = int(num_boxes)
+    if fixed_radius is not None:
+        fixed_radius = int(fixed_radius)
+    if box_size is not None:
+        box_size = int(box_size)
 
     with st.sidebar.expander("参数解释总览", expanded=False):
         st.markdown(
@@ -704,23 +1111,10 @@ def app():
     st.sidebar.caption("滚动页面时该按钮区会固定显示。")
     st.sidebar.markdown("</div>", unsafe_allow_html=True)
 
-    if "image_path" not in st.session_state:
-        st.session_state["image_path"] = None
-    if "case_id" not in st.session_state:
-        st.session_state["case_id"] = None
-    if "original_name" not in st.session_state:
-        st.session_state["original_name"] = None
-    if "output_folder" not in st.session_state:
-        st.session_state["output_folder"] = None
-
-    if uploaded is not None:
-        image_path, case_id, original_name, output_folder = save_uploaded_file(uploaded)
-        st.session_state["image_path"] = str(image_path)
-        st.session_state["case_id"] = case_id
-        st.session_state["original_name"] = original_name
-        st.session_state["output_folder"] = output_folder
-        st.info(f"当前样本ID: {case_id}")
-        st.caption(f"输出目录: web_demo_output/{output_folder}")
+    if st.session_state["case_id"] is not None:
+        st.info(f"当前样本ID: {st.session_state['case_id']}")
+        st.caption(f"输入图片尺寸: {st.session_state['image_size_text']}")
+        st.caption(f"输出目录: web_demo_output/{st.session_state['output_folder']}")
 
     if run_all:
         if st.session_state["image_path"] is None:
@@ -730,6 +1124,23 @@ def app():
             st.error("模型路径无效")
             st.stop()
 
+        params_snapshot = build_current_params_snapshot(
+            model_rel=model_rel,
+            target_class=target_class,
+            radius_mode=radius_mode,
+            fixed_radius=fixed_radius,
+            texture_threshold=texture_threshold,
+            density_weight=density_weight,
+            consistency_weight=consistency_weight,
+            heat_alpha=heat_alpha,
+            n_bins=n_bins,
+            presence_mode=presence_mode,
+            presence_cuts=presence_cuts,
+            box_mode=box_mode,
+            box_size=box_size,
+            num_boxes=num_boxes,
+            min_overlap=min_overlap,
+        )
         with st.spinner("正在生成全流程中间结果..."):
             image_path = Path(st.session_state["image_path"])
             case_id = st.session_state["case_id"]
@@ -756,6 +1167,13 @@ def app():
                 device=device,
             )
         st.success(f"完成。radius={heat_info['radius']}，box_size={heat_info['box_size']}")
+        run_params_path = save_params_to_output_dir(
+            out_dir=Path(heat_info["out_dir"]),
+            input_image_path=image_path,
+            params_snapshot=params_snapshot,
+            heat_info=heat_info,
+        )
+        st.caption(f"参数已保存: {run_params_path.name}")
         if heat_info.get("presence_mode") == "quantile":
             st.caption(
                 f"Presence分位线(%): {heat_info['presence_cuts']} -> 实际阈值: "
@@ -772,6 +1190,23 @@ def app():
             st.error("模型路径无效")
             st.stop()
 
+        params_snapshot = build_current_params_snapshot(
+            model_rel=model_rel,
+            target_class=target_class,
+            radius_mode=radius_mode,
+            fixed_radius=fixed_radius,
+            texture_threshold=texture_threshold,
+            density_weight=density_weight,
+            consistency_weight=consistency_weight,
+            heat_alpha=heat_alpha,
+            n_bins=n_bins,
+            presence_mode=presence_mode,
+            presence_cuts=presence_cuts,
+            box_mode=box_mode,
+            box_size=box_size,
+            num_boxes=num_boxes,
+            min_overlap=min_overlap,
+        )
         with st.spinner("正在按新参数重算热图和最严重框..."):
             image_path = Path(st.session_state["image_path"])
             case_id = st.session_state["case_id"]
@@ -797,6 +1232,13 @@ def app():
                 device=device,
             )
         st.success(f"重算完成。radius={heat_info['radius']}，box_size={heat_info['box_size']}")
+        run_params_path = save_params_to_output_dir(
+            out_dir=Path(heat_info["out_dir"]),
+            input_image_path=image_path,
+            params_snapshot=params_snapshot,
+            heat_info=heat_info,
+        )
+        st.caption(f"参数已保存: {run_params_path.name}")
         if heat_info.get("presence_mode") == "quantile":
             st.caption(
                 f"Presence分位线(%): {heat_info['presence_cuts']} -> 实际阈值: "
@@ -809,6 +1251,9 @@ def app():
         case_id = st.session_state["case_id"]
         output_folder = st.session_state.get("output_folder") or case_id
         out_dir = OUTPUT_DIR / output_folder
+        image_size_text = st.session_state.get("image_size_text")
+        if image_size_text:
+            st.caption(f"当前输入图片尺寸: {image_size_text}")
         st.caption(f"当前输出目录: web_demo_output/{output_folder}")
         try:
             orientation_only_show = resolve_predict_output(case_id, "orientation_only_texture_line_")
@@ -896,11 +1341,18 @@ def app():
 
         worst_box_img = sorted(out_dir.glob("*_worst*_box.png"), key=lambda p: p.stat().st_mtime)
         worst_dir_img = sorted(out_dir.glob("*_worst*_direction.png"), key=lambda p: p.stat().st_mtime)
+        worst_area_img = sorted(out_dir.glob("*_worst*_area.png"), key=lambda p: p.stat().st_mtime)
         if worst_box_img:
             show_image_with_explain(
                 worst_box_img[-1],
                 "最严重框",
                 "在目标区域内筛选出的高严重度框，支持1~5个不重叠框。",
+            )
+        if worst_area_img:
+            show_image_with_explain(
+                worst_area_img[-1],
+                "Worst Area 联通区域",
+                "显示每个最严重框对应的高分联通区域（A=80分位阈值）以及种子点，后续框与这些区域不重叠。",
             )
         if worst_dir_img:
             show_image_with_explain(

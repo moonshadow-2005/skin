@@ -67,6 +67,20 @@ def imread_unicode(image_path, flags=cv2.IMREAD_COLOR):
         return None
     return cv2.imdecode(data, flags)
 
+
+def keep_largest_connected_component(mask: np.ndarray) -> np.ndarray:
+    """仅保留二值掩码中面积最大的8连通域。"""
+    binary = (mask > 0).astype(np.uint8)
+    if np.count_nonzero(binary) == 0:
+        return binary
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    if num_labels <= 1:
+        return binary
+
+    largest_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    return (labels == largest_label).astype(np.uint8)
+
 def analyze_skin_texture(image_path, model_path='best_trans_unet_model_20250614_122913.pth', device='cuda'):
     """
     皮肤纹理分析主函数
@@ -197,48 +211,46 @@ def analyze_skin_texture(image_path, model_path='best_trans_unet_model_20250614_
     
     # 应用腐蚀操作到扩展后的掩模
     shrunk_mask = cv2.erode(expanded_mask, shrink_kernel, iterations=1)
+    shrunk_mask = keep_largest_connected_component(shrunk_mask)
     
     # 新增：提前定义base_name
     base_name = os.path.basename(image_path).split('.')[0]
     
     # 修改单独保存纹理线条图部分（添加掩模应用）
-    plt.figure(figsize=(8, 8))
+    # 使用面向对象接口，避免 pyplot 当前轴状态在某些环境下错乱。
+    fig1, ax1 = plt.subplots(figsize=(8, 8))
 
-    
     # 应用收缩后的掩模
     refined_lines = cv2.bitwise_and(texture_lines, texture_lines, mask=shrunk_mask)
-    
-    plt.imshow(refined_lines, cmap='gray')
-    plt.axis('off')
+
+    ax1.imshow(refined_lines, cmap='gray')
+    ax1.axis('off')
     line_only_path = os.path.join(output_dir, f"only_texture_line_{base_name}.png")
     
     # 关键修改：添加保存参数
-    plt.savefig(line_only_path, 
-               bbox_inches='tight', 
-               pad_inches=0, 
-               facecolor='none', 
-               transparent=True)
-    
-    plt.close()  # 关闭当前figure释放内存
+    fig1.savefig(line_only_path,
+                 bbox_inches='tight',
+                 pad_inches=0,
+                 facecolor='none',
+                 transparent=True)
+
+    plt.close(fig1)  # 关闭当前figure释放内存
     
     # 创建线条可视化
-    plt.figure(figsize=(15, 8))
-    
+    fig2, axes = plt.subplots(1, 3, figsize=(15, 8))
+
     # 原始图像
-    plt.subplot(1, 3, 1)
-    plt.title("原始图像")
-    plt.imshow(original_img)
-    plt.axis('off')
-    
+    axes[0].set_title("原始图像")
+    axes[0].imshow(original_img)
+    axes[0].axis('off')
+
     # 纯纹理线条图
-    plt.subplot(1, 3, 2)
-    plt.title("纹理线条图")
-    plt.imshow(texture_lines, cmap='gray')
-    plt.axis('off')
-    
+    axes[1].set_title("纹理线条图")
+    axes[1].imshow(texture_lines, cmap='gray')
+    axes[1].axis('off')
+
     # 叠加显示（仅在受影响区域显示）
-    plt.subplot(1, 3, 3)
-    plt.title("线条叠加效果")
+    axes[2].set_title("线条叠加效果")
     
     # 生成彩色线条（红色）
     line_color = np.zeros_like(original_img)
@@ -250,8 +262,8 @@ def analyze_skin_texture(image_path, model_path='best_trans_unet_model_20250614_
     # 叠加到原图
     overlay = cv2.addWeighted(original_img, 0.7, line_color, 0.3, 0)
     
-    plt.imshow(overlay)
-    plt.axis('off')
+    axes[2].imshow(overlay)
+    axes[2].axis('off')
     
     # 修改保存路径
     output_path = os.path.join(output_dir, f"texture_line_{base_name}.png")
@@ -260,7 +272,8 @@ def analyze_skin_texture(image_path, model_path='best_trans_unet_model_20250614_
     #mask_path = os.path.join(output_dir, f"mask_{base_name}.png")
     #cv2.imwrite(mask_path, expanded_mask * 255)
     
-    plt.savefig(output_path, bbox_inches='tight')
+    fig2.savefig(output_path, bbox_inches='tight')
+    plt.close(fig2)
     print(f"对比图已保存至: {output_path}")
     print(f"单独线条图已保存至: {line_only_path}")
 

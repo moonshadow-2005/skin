@@ -119,6 +119,7 @@ def find_worst_box(
     min_overlap_ratio: float = 0.30,
     overlap_power: float = 0.35,
     forbidden_boxes: list[dict] | None = None,
+    forbidden_area_mask: np.ndarray | None = None,
 ):
     h, w = score.shape
     if h < box_size or w < box_size:
@@ -194,6 +195,11 @@ def find_worst_box(
         if forbidden_boxes and any(boxes_overlap(candidate_box, fb) for fb in forbidden_boxes):
             continue
 
+        if forbidden_area_mask is not None:
+            area_patch = forbidden_area_mask[y1_t:y2_t, x1_t:x2_t]
+            if np.any(area_patch > 0):
+                continue
+
         yc, xc = yy, xx
         chosen = candidate_box
         break
@@ -219,6 +225,45 @@ def find_worst_box(
         "overlap_count": float(overlap_count[yc, xc]),
         "overlap_ratio": float(overlap_ratio[yc, xc]),
     }
+
+
+def extract_connected_high_area(
+    score: np.ndarray,
+    mask: np.ndarray,
+    box: dict,
+    threshold: float,
+) -> tuple[np.ndarray, tuple[int, int] | None, float | None]:
+    """From a box, pick the max-score seed and keep its connected component above threshold."""
+    h, w = score.shape
+    out = np.zeros((h, w), dtype=np.uint8)
+
+    x1, y1, x2, y2 = box["x1"], box["y1"], box["x2"], box["y2"]
+    patch_score = score[y1:y2, x1:x2]
+    patch_mask = (mask[y1:y2, x1:x2] > 0)
+    if patch_score.size == 0 or not np.any(patch_mask):
+        return out, None, None
+
+    masked_vals = np.where(patch_mask, patch_score, -np.inf)
+    flat_idx = int(np.argmax(masked_vals))
+    py, px = np.unravel_index(flat_idx, patch_score.shape)
+    sx = int(x1 + px)
+    sy = int(y1 + py)
+    seed_val = float(score[sy, sx])
+
+    high = ((score >= threshold) & (mask > 0)).astype(np.uint8)
+    if high[sy, sx] == 0:
+        return out, (sx, sy), seed_val
+
+    n_labels, labels = cv2.connectedComponents(high, connectivity=8)
+    if n_labels <= 1:
+        return out, (sx, sy), seed_val
+
+    label_id = int(labels[sy, sx])
+    if label_id <= 0:
+        return out, (sx, sy), seed_val
+
+    out[labels == label_id] = 1
+    return out, (sx, sy), seed_val
 
 
 def mean_orientation_degrees(orientations: np.ndarray, mask: np.ndarray, box):
@@ -268,6 +313,10 @@ def draw_outputs(
     boxes: list[dict],
     mean_degs: list[float | None],
     pred: np.ndarray,
+    region_mask: np.ndarray | None = None,
+    area_masks: list[np.ndarray] | None = None,
+    seed_points: list[tuple[int, int] | None] | None = None,
+    area_threshold: float | None = None,
 ):
     img = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if img is None:
@@ -275,23 +324,36 @@ def draw_outputs(
 
     # Draw both mask boundaries on top of the original image.
     # class 1 (affected area): green, class 2 (keloid body): cyan.
-    class1 = (pred == 1).astype(np.uint8)
+    # Prefer post-processed class1 mask to keep visualization consistent with scoring.
+    class1_source = "raw_pred_class1"
+    if region_mask is not None:
+        class1 = (region_mask > 0).astype(np.uint8)
+        class1_source = "postprocessed_region_mask"
+    else:
+        class1 = (pred == 1).astype(np.uint8)
     class2 = (pred == 2).astype(np.uint8)
     anchor = axis_aligned_bbox_center(class2)
     if anchor is None:
         # Fallback to class1 center if class2 is absent.
         anchor = axis_aligned_bbox_center(class1)
 
-    def draw_boundary(canvas: np.ndarray, binary_mask: np.ndarray, color_bgr: tuple[int, int, int]):
-        contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(canvas, contours, -1, color_bgr, 2)
+    def draw_boundary_like_segmentation(canvas: np.ndarray, binary_mask: np.ndarray):
+        contours, hierarchy = cv2.findContours(binary_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+        if hierarchy is not None:
+            hier = hierarchy[0]
+            for i, cnt in enumerate(contours):
+                parent = hier[i][3]
+                color = (0, 255, 0) if parent == -1 else (255, 0, 0)
+                cv2.drawContours(canvas, [cnt], -1, color, 2)
+        else:
+            contours_ext, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(canvas, contours_ext, -1, (0, 255, 0), 2)
 
     if len(boxes) == 0:
         raise RuntimeError("No boxes to draw.")
 
     vis_box = img.copy()
-    draw_boundary(vis_box, class1, (0, 255, 0))
-    draw_boundary(vis_box, class2, (255, 255, 0))
+    draw_boundary_like_segmentation(vis_box, class1)
     box_colors = [(0, 0, 255), (255, 0, 255), (0, 165, 255)]
     for i, box in enumerate(boxes):
         color = box_colors[i % len(box_colors)]
@@ -310,6 +372,53 @@ def draw_outputs(
         )
 
     vis_dir = vis_box.copy()
+    vis_area = img.copy()
+    draw_boundary_like_segmentation(vis_area, class1)
+
+    if area_masks is None:
+        area_masks = []
+    if seed_points is None:
+        seed_points = []
+
+    area_colors = [(70, 70, 255), (255, 70, 70), (70, 220, 220), (220, 70, 220), (70, 220, 120)]
+    for i, a in enumerate(area_masks):
+        if a is None:
+            continue
+        color = area_colors[i % len(area_colors)]
+        m = (a > 0)
+        if np.any(m):
+            for c in range(3):
+                vis_area[:, :, c][m] = (0.55 * vis_area[:, :, c][m] + 0.45 * color[c]).astype(np.uint8)
+            contours_a, _ = cv2.findContours((a > 0).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(vis_area, contours_a, -1, color, 2)
+        if i < len(seed_points) and seed_points[i] is not None:
+            sx, sy = seed_points[i]
+            cv2.circle(vis_area, (int(sx), int(sy)), 4, (255, 255, 255), -1)
+            cv2.putText(
+                vis_area,
+                f"S{i+1}",
+                (int(sx) + 6, max(14, int(sy) - 6)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+        if i < len(boxes):
+            b = boxes[i]
+            cv2.rectangle(vis_area, (b["x1"], b["y1"]), (b["x2"], b["y2"]), color, 2)
+
+    if area_threshold is not None:
+        cv2.putText(
+            vis_area,
+            f"A(p80)={area_threshold:.4f}",
+            (10, 24),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
     constrained_degs: list[float | None] = []
     for i, box in enumerate(boxes):
         mean_deg = mean_degs[i] if i < len(mean_degs) else None
@@ -363,11 +472,16 @@ def draw_outputs(
     out_dir.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out_dir / f"{image_path.stem}_worst{box_size}_box.png"), vis_box)
     cv2.imwrite(str(out_dir / f"{image_path.stem}_worst{box_size}_direction.png"), vis_dir)
+    cv2.imwrite(str(out_dir / f"{image_path.stem}_worst{box_size}_area.png"), vis_area)
 
     with (out_dir / f"{image_path.stem}_worst{box_size}_info.txt").open("w", encoding="utf-8") as f:
         f.write(f"image={image_path.stem}\n")
         f.write(f"box_size={box_size}\n")
         f.write(f"num_boxes={len(boxes)}\n")
+        f.write(f"class1_boundary_source={class1_source}\n")
+        f.write(f"class1_boundary_area_px={int(np.count_nonzero(class1))}\n")
+        if area_threshold is not None:
+            f.write(f"area_threshold_p80={area_threshold:.6f}\n")
         for i, box in enumerate(boxes, start=1):
             f.write(f"box{i}_x1={box['x1']}\n")
             f.write(f"box{i}_y1={box['y1']}\n")
@@ -390,6 +504,12 @@ def draw_outputs(
                 f.write(f"box{i}_constrained_direction_deg=nan\n")
             else:
                 f.write(f"box{i}_constrained_direction_deg={constrained_deg:.6f}\n")
+            if i - 1 < len(area_masks) and area_masks[i - 1] is not None:
+                f.write(f"box{i}_connected_area_px={int(np.count_nonzero(area_masks[i - 1]))}\n")
+            if i - 1 < len(seed_points) and seed_points[i - 1] is not None:
+                sx, sy = seed_points[i - 1]
+                f.write(f"box{i}_seed_x={int(sx)}\n")
+                f.write(f"box{i}_seed_y={int(sy)}\n")
 
 
 def main():
@@ -431,20 +551,47 @@ def main():
     boxes = []
     means = []
     forbidden = []
+    area_masks: list[np.ndarray] = []
+    seed_points: list[tuple[int, int] | None] = []
+    forbidden_area = np.zeros_like(mask, dtype=np.uint8)
+    vals_inside = score[mask > 0]
+    area_threshold = float(np.quantile(vals_inside, 0.80)) if vals_inside.size > 0 else 0.0
     for _ in range(args.num_boxes):
-        box = find_worst_box(
-            score,
-            mask,
-            box_size=used_box_size,
-            min_overlap_ratio=args.min_overlap,
-            overlap_power=args.overlap_power,
-            forbidden_boxes=forbidden,
-        )
+        try:
+            box = find_worst_box(
+                score,
+                mask,
+                box_size=used_box_size,
+                min_overlap_ratio=args.min_overlap,
+                overlap_power=args.overlap_power,
+                forbidden_boxes=forbidden,
+                forbidden_area_mask=forbidden_area,
+            )
+        except RuntimeError:
+            break
         boxes.append(box)
         means.append(mean_orientation_degrees(orientations, mask, box))
         forbidden.append(box)
+        area_mask, seed_pt, _ = extract_connected_high_area(score, mask, box, area_threshold)
+        area_masks.append(area_mask)
+        seed_points.append(seed_pt)
+        forbidden_area[area_mask > 0] = 1
 
-    draw_outputs(image_path, out_dir, used_box_size, boxes, means, pred)
+    if len(boxes) == 0:
+        raise RuntimeError("No boxes found under connected-area constraints.")
+
+    draw_outputs(
+        image_path,
+        out_dir,
+        used_box_size,
+        boxes,
+        means,
+        pred,
+        region_mask=mask,
+        area_masks=area_masks,
+        seed_points=seed_points,
+        area_threshold=area_threshold,
+    )
 
     print("Done.")
     print(f"output_dir={out_dir}")

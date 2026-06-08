@@ -26,12 +26,12 @@ def imread_unicode(image_path: str, flags=cv2.IMREAD_COLOR):
 def dynamic_radius_from_size(
     height: int,
     width: int,
-    base_radius: int = 40,
+    base_radius: int = 80,
     ref_min_dim: int = 920,
     min_radius: int = 12,
     max_radius: int = 96,
 ) -> int:
-    """Scale radius by image short side. Reference: min_dim=920 -> radius=40."""
+    """Scale radius by image short side. Reference: min_dim=920 -> radius=80."""
     min_dim = min(height, width)
     if min_dim <= 0:
         return base_radius
@@ -46,6 +46,23 @@ def build_disk_kernel(radius: int) -> np.ndarray:
     y, x = np.ogrid[-radius : radius + 1, -radius : radius + 1]
     disk = (x * x + y * y) <= radius * radius
     return disk.astype(np.float32)
+
+
+def keep_largest_connected_component(mask: np.ndarray) -> np.ndarray:
+    """Keep only the largest 8-connected foreground component in a binary mask."""
+    if mask.ndim != 2:
+        raise ValueError("mask must be a 2D array")
+
+    binary = (mask > 0).astype(np.uint8)
+    if np.count_nonzero(binary) == 0:
+        return binary
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    if num_labels <= 1:
+        return binary
+
+    largest_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    return (labels == largest_label).astype(np.uint8)
 
 
 def predict_mask(image_path: str, model_path: str, device: str) -> np.ndarray:
@@ -96,7 +113,8 @@ def build_effective_texture_region_mask(raw_region_mask: np.ndarray) -> np.ndarr
     shrink_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (shrink_ksize, shrink_ksize))
     refined = cv2.erode(expanded, shrink_kernel, iterations=1)
 
-    return refined.astype(np.uint8)
+    # Enforce connectivity requirement: keep only the largest connected component.
+    return keep_largest_connected_component(refined)
 
 
 def compute_orientations(gray_img: np.ndarray, valid_mask: np.ndarray) -> np.ndarray:
@@ -158,6 +176,51 @@ def overlay_heatmap(original_bgr: np.ndarray, heatmap_bgr: np.ndarray, region_ma
     for c in range(3):
         overlay[:, :, c][m] = (1.0 - alpha) * overlay[:, :, c][m] + alpha * heat[:, :, c][m]
     return np.clip(overlay, 0, 255).astype(np.uint8)
+
+
+def add_vertical_colorbar_bgr(
+    image_bgr: np.ndarray,
+    cmap_name: str = "jet",
+    bar_width: int = 28,
+    pad: int = 10,
+    margin: int = 12,
+) -> np.ndarray:
+    """Append a vertical 0-1 colorbar to the right side of image (BGR)."""
+    h, w = image_bgr.shape[:2]
+    canvas_w = w + pad + bar_width + 56
+    canvas = np.full((h, canvas_w, 3), 255, dtype=np.uint8)
+    canvas[:, :w] = image_bgr
+
+    y = np.linspace(1.0, 0.0, h, dtype=np.float32)[:, None]
+    cmap_rgb = cm.get_cmap(cmap_name)(y)[:, :, :3]
+    bar_rgb = (cmap_rgb * 255).astype(np.uint8)
+    bar_bgr = cv2.cvtColor(bar_rgb, cv2.COLOR_RGB2BGR)
+    bar = np.repeat(bar_bgr, bar_width, axis=1)
+
+    x0 = w + pad
+    x1 = x0 + bar_width
+    canvas[:, x0:x1] = bar
+    cv2.rectangle(canvas, (x0, 0), (x1 - 1, h - 1), (0, 0, 0), 1)
+
+    # Ticks and labels: 1.0, 0.75, 0.50, 0.25, 0.0
+    ticks = [1.0, 0.75, 0.50, 0.25, 0.0]
+    for t in ticks:
+        yy = int(round((1.0 - t) * (h - 1)))
+        cv2.line(canvas, (x1 + 2, yy), (x1 + 10, yy), (0, 0, 0), 1)
+        label = f"{t:.2f}" if t not in (1.0, 0.0) else f"{t:.1f}"
+        cv2.putText(
+            canvas,
+            label,
+            (x1 + 14, min(max(yy + 4, margin), h - margin)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (0, 0, 0),
+            1,
+            cv2.LINE_AA,
+        )
+
+    cv2.putText(canvas, "Severity", (x0 - 2, margin), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (0, 0, 0), 1, cv2.LINE_AA)
+    return canvas
 
 
 def draw_mask_boundary(
@@ -306,6 +369,7 @@ def run_for_id(
         original = cv2.resize(original, (heatmap_bgr.shape[1], heatmap_bgr.shape[0]))
 
     overlay = overlay_heatmap(original, heatmap_bgr, region_mask, alpha=0.55)
+    overlay_with_bar = add_vertical_colorbar_bgr(overlay, cmap_name="jet")
 
     presence_map, presence_inside_mask, presence_quantiles = build_presence_map(
         score_norm,
@@ -329,7 +393,7 @@ def run_for_id(
     cv2.imwrite(str(out_dir / f"{num}_local_density.png"), (density * 255).astype(np.uint8))
     cv2.imwrite(str(out_dir / f"{num}_local_consistency.png"), (consistency * 255).astype(np.uint8))
     cv2.imwrite(str(out_dir / f"{num}_severity_map.png"), heatmap_bgr)
-    cv2.imwrite(str(out_dir / f"{num}_severity_overlay.png"), overlay)
+    cv2.imwrite(str(out_dir / f"{num}_severity_overlay.png"), overlay_with_bar)
     cv2.imwrite(str(out_dir / f"{num}_presence_map.png"), presence_map)
     cv2.imwrite(str(out_dir / f"{num}_presence_overlay.png"), presence_overlay)
 
