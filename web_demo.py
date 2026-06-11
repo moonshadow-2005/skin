@@ -5,6 +5,7 @@ import importlib
 import json
 import re
 import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple
 
@@ -55,12 +56,12 @@ PARAM_DEFAULTS = {
     "density_weight": 0.70,
     "consistency_weight": 0.30,
     "heat_alpha": 0.55,
-    "n_bins": 4,
-    "presence_mode": "threshold",
-    "presence_cuts": [0.25, 0.50, 0.75],
+    "n_bins": 2,
+    "presence_mode": "quantile",
+    "presence_cuts": [80.0],
     "box_mode": "固定",
     "box_size": 80,
-    "num_boxes": 1,
+    "num_boxes": 2,
     "min_overlap": 0.30,
 }
 
@@ -254,6 +255,23 @@ def save_uploaded_file(uploaded) -> tuple[Path, str, str, str]:
     image_path = INPUT_DIR / f"{case_id}{ext}"
     image_path.write_bytes(content)
     return image_path, case_id, original_name, output_folder
+
+
+def new_batch_id() -> str:
+    return f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+
+def save_batch_manifest(batch_dir: Path, items: list[dict]) -> Path:
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "batch_id": batch_dir.name,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "num_items": len(items),
+        "items": items,
+    }
+    out = batch_dir / "batch_manifest.json"
+    out.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return out
 
 
 def copy_original_to_output(image_path: Path, out_dir: Path, original_name: str | None = None) -> Path:
@@ -847,6 +865,63 @@ def show_image_with_explain(path: Path, title: str, explain: str):
         st.caption(explain)
 
 
+def render_case_results(case_id: str, output_folder: str, image_size_text: str | None = None):
+    out_dir = OUTPUT_DIR / output_folder
+    if image_size_text:
+        st.caption(f"当前输入图片尺寸: {image_size_text}")
+    st.caption(f"当前输出目录: web_demo_output/{output_folder}")
+    try:
+        orientation_only_show = resolve_predict_output(case_id, "orientation_only_texture_line_")
+    except Exception:
+        orientation_only_show = PROJECT_ROOT / "predict_output" / f"orientation_only_texture_line_{case_id}.png"
+    try:
+        orientation_full_show = resolve_predict_output(case_id, "orientation_texture_line_")
+    except Exception:
+        orientation_full_show = PROJECT_ROOT / "predict_output" / f"orientation_texture_line_{case_id}.png"
+    try:
+        sector_vis_show = resolve_predict_output(case_id, "spatial_sector_directions_")
+    except Exception:
+        sector_vis_show = PROJECT_ROOT / "predict_output" / f"spatial_sector_directions_{case_id}.png"
+
+    st.subheader("中间结果总览")
+    copied_original = sorted(out_dir.glob("00_original__*"), key=lambda p: p.stat().st_mtime)
+    if copied_original:
+        show_image_with_explain(
+            copied_original[-1],
+            "原图（已复制到输出目录）",
+            "这是上传原图在 web_demo_output 中的副本，便于后续查阅与结果对照。",
+        )
+    show_image_with_explain(out_dir / "segmentation_overlay.png", "分割叠加图", "显示三分类分割结果叠加在原图上，用于快速检查分割边界是否合理。")
+    show_image_with_explain(out_dir / "segmentation_filled.png", "分割填充图", "将各类别区域直接上色填充，便于查看面积分布与类别关系。")
+    show_image_with_explain(PROJECT_ROOT / "skin_output" / f"only_texture_line_{case_id}.png", "纯纹理线条", "仅保留纹理线条信号，作为方向分析与局部评分的核心输入。")
+    show_image_with_explain(PROJECT_ROOT / "skin_output" / f"texture_line_{case_id}.png", "纹理对比图", "展示原图、纹理线条和叠加效果，帮助判断纹理提取是否过强或过弱。")
+    show_image_with_explain(orientation_only_show, "方向图（纯）", "在纹理线条上绘制局部方向与主方向，便于观察纹理走向。")
+    show_image_with_explain(orientation_full_show, "方向图（含背景）", "在背景上下文中查看方向信息，更容易定位方向异常区域。")
+    show_image_with_explain(out_dir / "final_overlay.png", "最终叠加图", "将主要方向结果叠加回原图，作为整体效果展示图。")
+    show_image_with_explain(sector_vis_show, "8扇区分析", "把区域划分为8个扇区，比较各扇区纹理密度与方向一致性。")
+
+    st.subheader("热图与最严重框")
+    show_image_with_explain(out_dir / "severity_map.png", "Severity Map", "像素级严重度图，分数由纹理密度与方向一致性加权得到。")
+    show_image_with_explain(out_dir / "presence_map.png", "Presence Map", "按你设置的阈值/分位把严重度分档着色，最高档固定为红色。")
+    show_image_with_explain(out_dir / "severity_overlay.png", "Severity Overlay", "将 Severity Map 叠加到原图，方便观察高分区与真实组织位置关系。")
+    show_image_with_explain(out_dir / "presence_overlay.png", "Presence Overlay", "将 Presence 分级结果叠加到原图，用于直观查看各档分布范围。")
+
+    worst_box_img = sorted(out_dir.glob("*_worst*_box.png"), key=lambda p: p.stat().st_mtime)
+    worst_dir_img = sorted(out_dir.glob("*_worst*_direction.png"), key=lambda p: p.stat().st_mtime)
+    worst_area_img = sorted(out_dir.glob("*_worst*_area.png"), key=lambda p: p.stat().st_mtime)
+    if worst_box_img:
+        show_image_with_explain(worst_box_img[-1], "最严重框", "在目标区域内筛选出的高严重度框，支持1~5个不重叠框。")
+    if worst_area_img:
+        show_image_with_explain(worst_area_img[-1], "Worst Area 联通区域", "显示每个最严重框对应的高分联通区域（A=80分位阈值）以及种子点，后续框与这些区域不重叠。")
+    if worst_dir_img:
+        show_image_with_explain(worst_dir_img[-1], "框内方向", "在最严重框中心绘制主方向箭头，反映该区域主要纹理方向。")
+
+    info_files = sorted(out_dir.glob("*_worst*_info.txt"))
+    if info_files:
+        st.markdown("**最严重框参数文本**")
+        st.code(info_files[-1].read_text(encoding="utf-8"), language="text")
+
+
 def app():
     st.set_page_config(page_title="皮肤纹理方向分析 Demo", layout="wide")
 
@@ -908,6 +983,13 @@ def app():
         type=["jpg", "jpeg", "png", "bmp", "tif", "tiff"],
         help="上传待分析图片。系统会生成分割、纹理、方向、热图和最严重框等中间结果。",
     )
+    batch_uploaded = st.file_uploader(
+        "批量选择图片文件",
+        type=["jpg", "jpeg", "png", "bmp", "tif", "tiff"],
+        accept_multiple_files=True,
+        key="batch_uploader",
+        help="可一次选择多张图片批量运行。结果会保存到同一批次目录下。",
+    )
 
     if "image_path" not in st.session_state:
         st.session_state["image_path"] = None
@@ -919,6 +1001,10 @@ def app():
         st.session_state["output_folder"] = None
     if "image_size_text" not in st.session_state:
         st.session_state["image_size_text"] = None
+    if "batch_records" not in st.session_state:
+        st.session_state["batch_records"] = []
+    if "batch_id" not in st.session_state:
+        st.session_state["batch_id"] = None
     if "_params_loaded_for_output_folder" not in st.session_state:
         st.session_state["_params_loaded_for_output_folder"] = None
     if "_pending_params_to_apply" not in st.session_state:
@@ -1108,6 +1194,7 @@ def app():
     st.sidebar.subheader("运行按钮")
     run_all = st.sidebar.button("1) 生成全流程", help="首次运行建议点击，生成全部中间结果与可视化。")
     rerun_part = st.sidebar.button("2) 仅重算热图/框", help="不重跑分割和方向，仅按当前参数更新热图与最严重框。")
+    run_batch = st.sidebar.button("3) 批量处理", help="对批量上传的多张图按当前参数一次性处理。")
     st.sidebar.caption("滚动页面时该按钮区会固定显示。")
     st.sidebar.markdown("</div>", unsafe_allow_html=True)
 
@@ -1123,6 +1210,9 @@ def app():
         if not model_path.exists():
             st.error("模型路径无效")
             st.stop()
+
+        st.session_state["batch_records"] = []
+        st.session_state["batch_id"] = None
 
         params_snapshot = build_current_params_snapshot(
             model_rel=model_rel,
@@ -1190,6 +1280,9 @@ def app():
             st.error("模型路径无效")
             st.stop()
 
+        st.session_state["batch_records"] = []
+        st.session_state["batch_id"] = None
+
         params_snapshot = build_current_params_snapshot(
             model_rel=model_rel,
             target_class=target_class,
@@ -1247,124 +1340,119 @@ def app():
         else:
             st.caption(f"Presence阈值线: {[round(v, 4) for v in heat_info['presence_thresholds']]}")
 
-    if st.session_state["case_id"] is not None:
+    if run_batch:
+        if not batch_uploaded:
+            st.error("请先在“批量选择图片文件”里选择至少一张图片")
+            st.stop()
+        if not model_path.exists():
+            st.error("模型路径无效")
+            st.stop()
+
+        params_snapshot = build_current_params_snapshot(
+            model_rel=model_rel,
+            target_class=target_class,
+            radius_mode=radius_mode,
+            fixed_radius=fixed_radius,
+            texture_threshold=texture_threshold,
+            density_weight=density_weight,
+            consistency_weight=consistency_weight,
+            heat_alpha=heat_alpha,
+            n_bins=n_bins,
+            presence_mode=presence_mode,
+            presence_cuts=presence_cuts,
+            box_mode=box_mode,
+            box_size=box_size,
+            num_boxes=num_boxes,
+            min_overlap=min_overlap,
+        )
+
+        batch_id = new_batch_id()
+        batch_root = OUTPUT_DIR / batch_id
+        batch_items = []
+        failed = []
+
+        with st.spinner(f"正在批量处理 {len(batch_uploaded)} 张图片..."):
+            for idx, one in enumerate(batch_uploaded, start=1):
+                try:
+                    image_path, case_id, original_name, output_folder = save_uploaded_file(one)
+                    output_folder = f"{batch_id}/{output_folder}"
+
+                    original_for_size = imread_unicode(image_path, cv2.IMREAD_COLOR)
+                    if original_for_size is not None:
+                        h, w = original_for_size.shape[:2]
+                        image_size_text = f"{w}×{h} 像素"
+                    else:
+                        image_size_text = "读取失败"
+
+                    run_full_pipeline(image_path, case_id, output_folder, original_name, model_path, device)
+                    heat_info = run_heatmap_and_worst(
+                        image_path=image_path,
+                        case_id=case_id,
+                        output_folder=output_folder,
+                        original_name=original_name,
+                        model_path=model_path,
+                        target_class=target_class,
+                        fixed_radius=fixed_radius,
+                        texture_threshold=texture_threshold,
+                        density_weight=density_weight,
+                        consistency_weight=consistency_weight,
+                        heat_alpha=heat_alpha,
+                        presence_mode=presence_mode,
+                        presence_cuts=presence_cuts,
+                        box_size=box_size,
+                        num_boxes=num_boxes,
+                        min_overlap=min_overlap,
+                        device=device,
+                    )
+                    save_params_to_output_dir(
+                        out_dir=Path(heat_info["out_dir"]),
+                        input_image_path=image_path,
+                        params_snapshot=params_snapshot,
+                        heat_info=heat_info,
+                    )
+                    batch_items.append(
+                        {
+                            "index": idx,
+                            "original_name": original_name,
+                            "case_id": case_id,
+                            "output_folder": output_folder,
+                            "image_size_text": image_size_text,
+                        }
+                    )
+                except Exception as exc:
+                    failed.append(f"[{idx}] {getattr(one, 'name', 'unknown')}: {exc}")
+
+        save_batch_manifest(batch_root, batch_items)
+        st.session_state["batch_records"] = batch_items
+        st.session_state["batch_id"] = batch_id
+
+        if batch_items:
+            st.success(f"批量完成：成功 {len(batch_items)} 张，失败 {len(failed)} 张")
+            st.caption(f"批次目录: web_demo_output/{batch_id}")
+        else:
+            st.error("批量处理失败，未生成可用结果。")
+        if failed:
+            st.warning("部分图片处理失败：")
+            st.code("\n".join(failed), language="text")
+
+    batch_records = st.session_state.get("batch_records", [])
+    if batch_records:
+        st.subheader("批量结果浏览")
+        st.caption(f"当前批次目录: web_demo_output/{st.session_state.get('batch_id')}")
+        options = [f"{x['index']:02d}. {x['original_name']}" for x in batch_records]
+        selected = st.selectbox("点击选择图片查看结果", options=options, key="batch_viewer_select")
+        sel_idx = options.index(selected)
+        sel_item = batch_records[sel_idx]
+        render_case_results(
+            case_id=sel_item["case_id"],
+            output_folder=sel_item["output_folder"],
+            image_size_text=sel_item.get("image_size_text"),
+        )
+
+    if st.session_state["case_id"] is not None and not st.session_state.get("batch_records"):
         case_id = st.session_state["case_id"]
         output_folder = st.session_state.get("output_folder") or case_id
-        out_dir = OUTPUT_DIR / output_folder
-        image_size_text = st.session_state.get("image_size_text")
-        if image_size_text:
-            st.caption(f"当前输入图片尺寸: {image_size_text}")
-        st.caption(f"当前输出目录: web_demo_output/{output_folder}")
-        try:
-            orientation_only_show = resolve_predict_output(case_id, "orientation_only_texture_line_")
-        except Exception:
-            orientation_only_show = PROJECT_ROOT / "predict_output" / f"orientation_only_texture_line_{case_id}.png"
-        try:
-            orientation_full_show = resolve_predict_output(case_id, "orientation_texture_line_")
-        except Exception:
-            orientation_full_show = PROJECT_ROOT / "predict_output" / f"orientation_texture_line_{case_id}.png"
-        try:
-            sector_vis_show = resolve_predict_output(case_id, "spatial_sector_directions_")
-        except Exception:
-            sector_vis_show = PROJECT_ROOT / "predict_output" / f"spatial_sector_directions_{case_id}.png"
-
-        st.subheader("中间结果总览")
-        copied_original = sorted(out_dir.glob("00_original__*"), key=lambda p: p.stat().st_mtime)
-        if copied_original:
-            show_image_with_explain(
-                copied_original[-1],
-                "原图（已复制到输出目录）",
-                "这是上传原图在 web_demo_output 中的副本，便于后续查阅与结果对照。",
-            )
-        show_image_with_explain(
-            out_dir / "segmentation_overlay.png",
-            "分割叠加图",
-            "显示三分类分割结果叠加在原图上，用于快速检查分割边界是否合理。",
-        )
-        show_image_with_explain(
-            out_dir / "segmentation_filled.png",
-            "分割填充图",
-            "将各类别区域直接上色填充，便于查看面积分布与类别关系。",
-        )
-        show_image_with_explain(
-            PROJECT_ROOT / "skin_output" / f"only_texture_line_{case_id}.png",
-            "纯纹理线条",
-            "仅保留纹理线条信号，作为方向分析与局部评分的核心输入。",
-        )
-        show_image_with_explain(
-            PROJECT_ROOT / "skin_output" / f"texture_line_{case_id}.png",
-            "纹理对比图",
-            "展示原图、纹理线条和叠加效果，帮助判断纹理提取是否过强或过弱。",
-        )
-        show_image_with_explain(
-            orientation_only_show,
-            "方向图（纯）",
-            "在纹理线条上绘制局部方向与主方向，便于观察纹理走向。",
-        )
-        show_image_with_explain(
-            orientation_full_show,
-            "方向图（含背景）",
-            "在背景上下文中查看方向信息，更容易定位方向异常区域。",
-        )
-        show_image_with_explain(
-            out_dir / "final_overlay.png",
-            "最终叠加图",
-            "将主要方向结果叠加回原图，作为整体效果展示图。",
-        )
-        show_image_with_explain(
-            sector_vis_show,
-            "8扇区分析",
-            "把区域划分为8个扇区，比较各扇区纹理密度与方向一致性。",
-        )
-
-        st.subheader("热图与最严重框")
-        show_image_with_explain(
-            out_dir / "severity_map.png",
-            "Severity Map",
-            "像素级严重度图，分数由纹理密度与方向一致性加权得到。",
-        )
-        show_image_with_explain(
-            out_dir / "presence_map.png",
-            "Presence Map",
-            "按你设置的阈值/分位把严重度分档着色，最高档固定为红色。",
-        )
-        show_image_with_explain(
-            out_dir / "severity_overlay.png",
-            "Severity Overlay",
-            "将 Severity Map 叠加到原图，方便观察高分区与真实组织位置关系。",
-        )
-        show_image_with_explain(
-            out_dir / "presence_overlay.png",
-            "Presence Overlay",
-            "将 Presence 分级结果叠加到原图，用于直观查看各档分布范围。",
-        )
-
-        worst_box_img = sorted(out_dir.glob("*_worst*_box.png"), key=lambda p: p.stat().st_mtime)
-        worst_dir_img = sorted(out_dir.glob("*_worst*_direction.png"), key=lambda p: p.stat().st_mtime)
-        worst_area_img = sorted(out_dir.glob("*_worst*_area.png"), key=lambda p: p.stat().st_mtime)
-        if worst_box_img:
-            show_image_with_explain(
-                worst_box_img[-1],
-                "最严重框",
-                "在目标区域内筛选出的高严重度框，支持1~5个不重叠框。",
-            )
-        if worst_area_img:
-            show_image_with_explain(
-                worst_area_img[-1],
-                "Worst Area 联通区域",
-                "显示每个最严重框对应的高分联通区域（A=80分位阈值）以及种子点，后续框与这些区域不重叠。",
-            )
-        if worst_dir_img:
-            show_image_with_explain(
-                worst_dir_img[-1],
-                "框内方向",
-                "在最严重框中心绘制主方向箭头，反映该区域主要纹理方向。",
-            )
-
-        info_files = sorted(out_dir.glob("*_worst*_info.txt"))
-        if info_files:
-            st.markdown("**最严重框参数文本**")
-            st.code(info_files[-1].read_text(encoding="utf-8"), language="text")
+        render_case_results(case_id, output_folder, st.session_state.get("image_size_text"))
 
 
 if __name__ == "__main__":
