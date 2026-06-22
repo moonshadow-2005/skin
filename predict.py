@@ -674,8 +674,11 @@ def analyze_texture_orientation(image_path):
     plt.figure(figsize=(8, 8), facecolor='none')  # 透明背景
     plt.axis('off')
 
-    # 绘制红色纹理线条
-    plt.imshow(cv2.cvtColor(img, cv2.COLOR_GRAY2RGB) * [1, 0, 0], alpha=0.3)  # 红色纹理
+    # Keep non-texture pixels fully transparent so the overlay does not darken
+    # untouched areas of the original image.
+    texture_rgba = np.zeros((*img.shape, 4), dtype=np.float32)
+    texture_rgba[img > 0] = [1.0, 0.0, 0.0, 1.0]
+    plt.imshow(texture_rgba, interpolation='nearest')
 
     # 绘制蓝色局部方向箭头
     plt.quiver(
@@ -691,6 +694,32 @@ def analyze_texture_orientation(image_path):
         headwidth=4,
     )
 
+    # Build the local overlay at the source resolution. Scaling the alpha by the
+    # original grayscale intensity preserves the exact apparent line width.
+    orientation_local_path = os.path.join(output_dir, f"orientation_local_texture_line_{base_name}.png")
+    orientation_local = np.zeros((*img.shape, 4), dtype=np.uint8)
+    texture_pixels = img > 0
+    orientation_local[texture_pixels, 2] = 255
+    orientation_local[texture_pixels, 3] = ((img[texture_pixels].astype(np.uint16) + 1) // 2).astype(np.uint8)
+    for x, y, u, v in zip(X, Y, U, V):
+        start = (int(x), int(y))
+        end = (int(round(x + u)), int(round(y + v)))
+        cv2.arrowedLine(
+            orientation_local,
+            start,
+            end,
+            (255, 0, 0, 255),
+            thickness=1,
+            line_type=cv2.LINE_AA,
+            tipLength=0.35,
+        )
+    ok, encoded = cv2.imencode('.png', orientation_local)
+    if not ok:
+        raise RuntimeError(f"无法编码局部纹理走向图: {orientation_local_path}")
+    encoded.tofile(orientation_local_path)
+    print(f"局部纹理走向图已保存至: {orientation_local_path}")
+    plt.close()
+
     # 使用最密集扇区主方向（连续角度，不做8方向量化）。
     arrow_direction_deg = float(max_density_info.get('main_direction_deg', max_density_info.get('outward_direction_deg', 0.0)))
     arrow_direction_rad = np.radians(arrow_direction_deg)
@@ -705,46 +734,34 @@ def analyze_texture_orientation(image_path):
     dx_main = np.cos(arrow_direction_rad) * arrow_length
     dy_main = np.sin(arrow_direction_rad) * arrow_length
 
+    orientation_only = orientation_local.copy()
+
     # 绘制最密集扇区包裹最小水平矩形
     if densest_bbox is not None:
         x1, y1, x2, y2 = densest_bbox
-        plt.plot([x1, x2, x2, x1, x1], [y1, y1, y2, y2, y1], color='lime', linewidth=2)
+        cv2.rectangle(orientation_only, (x1, y1), (x2, y2), (0, 255, 0, 255), thickness=2)
 
     # 从最密集扇区包裹矩形中心绘制主箭头
-    plt.quiver(
-        arrow_start_x,
-        arrow_start_y,
-        dx_main,
-        dy_main,
-        color='yellow',
-        scale=1,
-        scale_units='xy',
-        angles='xy',
-        width=0.008,
-        headwidth=8,
-        headlength=10,
-    )
-    plt.text(
-        arrow_start_x + 20,
-        arrow_start_y + 20,
-        f"最密集扇区: {max_density_index}\n主方向: {arrow_direction_deg:.1f}°",
-        color='yellow',
-        fontsize=12,
-        bbox=dict(facecolor='black', alpha=0.5),
+    main_start = (int(round(arrow_start_x)), int(round(arrow_start_y)))
+    main_end = (int(round(arrow_start_x + dx_main)), int(round(arrow_start_y + dy_main)))
+    cv2.arrowedLine(
+        orientation_only,
+        main_start,
+        main_end,
+        (0, 255, 255, 255),
+        thickness=max(2, int(round(min(img.shape[:2]) / 180))),
+        line_type=cv2.LINE_AA,
+        tipLength=0.2,
     )
 
     # 同时保存一份orientation_only文件
     orientation_only_path2 = os.path.join(output_dir, f"orientation_only_texture_line_{base_name}.png")
-    plt.savefig(
-        orientation_only_path2,
-        bbox_inches='tight',
-        pad_inches=0,
-        transparent=True,
-    )
+    ok, encoded = cv2.imencode('.png', orientation_only)
+    if not ok:
+        raise RuntimeError(f"无法编码单独方向图: {orientation_only_path2}")
+    encoded.tofile(orientation_only_path2)
 
     print(f"单独方向图已同时保存至: {orientation_only_path2}")
-
-    plt.close()
     
     print(f"\n=== 分析完成 ===")
     print(f"最密集的纹理方向位于扇区{max_density_index} ({max_density_info['angle_range']})")

@@ -829,22 +829,22 @@ def run_full_pipeline(
         raise FileNotFoundError(f"纹理图未生成: {texture_path}")
 
     analyze_texture_orientation(str(texture_path))
-    orientation_only = resolve_predict_output(case_id, "orientation_only_texture_line_")
+    orientation_local = resolve_predict_output(case_id, "orientation_local_texture_line_")
     orientation_full = resolve_predict_output(case_id, "orientation_texture_line_")
     sector_vis = resolve_predict_output(case_id, "spatial_sector_directions_")
 
-    final_overlay = out_dir / "final_overlay.png"
-    overlay_images_unicode(str(image_path), str(orientation_only), str(final_overlay))
+    texture_direction_overlay = out_dir / "texture_direction_overlay.png"
+    overlay_images_unicode(str(image_path), str(orientation_local), str(texture_direction_overlay))
 
     return {
         "out_dir": out_dir,
         "original_copy": original_copy,
         "texture_only": texture_path,
         "texture_compare": PROJECT_ROOT / "skin_output" / f"texture_line_{case_id}.png",
-        "orientation_only": orientation_only,
+        "orientation_local": orientation_local,
         "orientation_full": orientation_full,
         "sector_vis": sector_vis,
-        "final_overlay": final_overlay,
+        "texture_direction_overlay": texture_direction_overlay,
     }
 
 
@@ -871,10 +871,6 @@ def render_case_results(case_id: str, output_folder: str, image_size_text: str |
         st.caption(f"当前输入图片尺寸: {image_size_text}")
     st.caption(f"当前输出目录: web_demo_output/{output_folder}")
     try:
-        orientation_only_show = resolve_predict_output(case_id, "orientation_only_texture_line_")
-    except Exception:
-        orientation_only_show = PROJECT_ROOT / "predict_output" / f"orientation_only_texture_line_{case_id}.png"
-    try:
         orientation_full_show = resolve_predict_output(case_id, "orientation_texture_line_")
     except Exception:
         orientation_full_show = PROJECT_ROOT / "predict_output" / f"orientation_texture_line_{case_id}.png"
@@ -895,9 +891,12 @@ def render_case_results(case_id: str, output_folder: str, image_size_text: str |
     show_image_with_explain(out_dir / "segmentation_filled.png", "分割填充图", "将各类别区域直接上色填充，便于查看面积分布与类别关系。")
     show_image_with_explain(PROJECT_ROOT / "skin_output" / f"only_texture_line_{case_id}.png", "纯纹理线条", "仅保留纹理线条信号，作为方向分析与局部评分的核心输入。")
     show_image_with_explain(PROJECT_ROOT / "skin_output" / f"texture_line_{case_id}.png", "纹理对比图", "展示原图、纹理线条和叠加效果，帮助判断纹理提取是否过强或过弱。")
-    show_image_with_explain(orientation_only_show, "方向图（纯）", "在纹理线条上绘制局部方向与主方向，便于观察纹理走向。")
     show_image_with_explain(orientation_full_show, "方向图（含背景）", "在背景上下文中查看方向信息，更容易定位方向异常区域。")
-    show_image_with_explain(out_dir / "final_overlay.png", "最终叠加图", "将主要方向结果叠加回原图，作为整体效果展示图。")
+    show_image_with_explain(
+        out_dir / "texture_direction_overlay.png",
+        "纹理走向叠加图",
+        "在原图上叠加纹理线与局部方向，不显示最密集扇区框、主方向箭头和文字。",
+    )
     show_image_with_explain(sector_vis_show, "8扇区分析", "把区域划分为8个扇区，比较各扇区纹理密度与方向一致性。")
 
     st.subheader("热图与最严重框")
