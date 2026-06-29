@@ -109,7 +109,7 @@ def compute_score_map(image_path: Path, model_path: Path, target_class: int, rad
     score = 0.7 * density + 0.3 * consistency
     score[region_mask == 0] = 0.0
 
-    return score, region_mask, orientations, pred, radius
+    return score, region_mask, orientations, pred, radius, density, consistency
 
 
 def find_worst_box(
@@ -263,6 +263,14 @@ def extract_connected_high_area(
         return out, (sx, sy), seed_val
 
     out[labels == label_id] = 1
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, close_kernel)
+    contours, _ = cv2.findContours(out, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    filled = np.zeros_like(out)
+    if contours:
+        cv2.drawContours(filled, contours, -1, 1, thickness=cv2.FILLED)
+        out = filled
+    out = ((out > 0) & (mask > 0)).astype(np.uint8)
     return out, (sx, sy), seed_val
 
 
@@ -283,6 +291,20 @@ def mean_orientation_degrees(orientations: np.ndarray, mask: np.ndarray, box):
     mean_angle = (mean_doubled / 2.0) % np.pi
     deg = np.degrees(mean_angle)
     return float(deg)
+
+
+def mean_orientation_degrees_for_mask(orientations: np.ndarray, mask: np.ndarray) -> float | None:
+    vals = orientations[mask > 0]
+    vals = vals[~np.isnan(vals)]
+    if vals.size == 0:
+        return None
+
+    doubled = 2.0 * vals
+    mc = float(np.mean(np.cos(doubled)))
+    ms = float(np.mean(np.sin(doubled)))
+    mean_doubled = float(np.arctan2(ms, mc))
+    mean_angle = (mean_doubled / 2.0) % np.pi
+    return float(np.degrees(mean_angle))
 
 
 def axis_aligned_bbox_center(binary_mask: np.ndarray) -> tuple[int, int] | None:
@@ -306,6 +328,46 @@ def orient_angle_towards_vector(mean_deg: float, vec_x: float, vec_y: float) -> 
     return float(np.degrees(theta))
 
 
+def draw_hollow_arrow(
+    canvas: np.ndarray,
+    start_point: tuple[int, int],
+    angle_deg: float,
+    length: float,
+    shaft_width: float,
+    color: tuple[int, int, int],
+):
+    """Draw an outlined arrow polygon from start_point; dimensions are supplied in pixels."""
+    sx, sy = start_point
+    theta = np.radians(angle_deg)
+    direction = np.array([np.cos(theta), np.sin(theta)], dtype=np.float32)
+    normal = np.array([-direction[1], direction[0]], dtype=np.float32)
+
+    length = max(8.0, float(length))
+    shaft_width = max(4.0, float(shaft_width))
+    head_length = min(length * 0.34, shaft_width * 3.2)
+    head_width = shaft_width * 2.4
+    shaft_length = max(4.0, length - head_length)
+
+    start = np.array([sx, sy], dtype=np.float32)
+    shaft_end = start + direction * shaft_length
+    tip = start + direction * length
+
+    points = np.array(
+        [
+            start + normal * (shaft_width * 0.5),
+            shaft_end + normal * (shaft_width * 0.5),
+            shaft_end + normal * (head_width * 0.5),
+            tip,
+            shaft_end - normal * (head_width * 0.5),
+            shaft_end - normal * (shaft_width * 0.5),
+            start - normal * (shaft_width * 0.5),
+        ],
+        dtype=np.int32,
+    )
+    outline_thickness = max(2, int(round(shaft_width * 0.22)))
+    cv2.polylines(canvas, [points], isClosed=True, color=color, thickness=outline_thickness, lineType=cv2.LINE_AA)
+
+
 def draw_outputs(
     image_path: Path,
     out_dir: Path,
@@ -317,6 +379,9 @@ def draw_outputs(
     area_masks: list[np.ndarray] | None = None,
     seed_points: list[tuple[int, int] | None] | None = None,
     area_threshold: float | None = None,
+    orientations: np.ndarray | None = None,
+    density_map: np.ndarray | None = None,
+    consistency_map: np.ndarray | None = None,
 ):
     img = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if img is None:
@@ -381,8 +446,14 @@ def draw_outputs(
         seed_points = []
 
     area_colors = [(70, 70, 255), (255, 70, 70), (70, 220, 220), (220, 70, 220), (70, 220, 120)]
+    area_direction_degs: list[float | None] = []
+    area_density_means: list[float | None] = []
+    area_consistency_means: list[float | None] = []
     for i, a in enumerate(area_masks):
         if a is None:
+            area_direction_degs.append(None)
+            area_density_means.append(None)
+            area_consistency_means.append(None)
             continue
         color = area_colors[i % len(area_colors)]
         m = (a > 0)
@@ -391,6 +462,66 @@ def draw_outputs(
                 vis_area[:, :, c][m] = (0.55 * vis_area[:, :, c][m] + 0.45 * color[c]).astype(np.uint8)
             contours_a, _ = cv2.findContours((a > 0).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(vis_area, contours_a, -1, color, 2)
+
+            direction_deg = mean_orientation_degrees_for_mask(orientations, a) if orientations is not None else None
+            center = axis_aligned_bbox_center(a)
+            density_mean = float(np.mean(density_map[m])) if density_map is not None else None
+            consistency_mean = float(np.mean(consistency_map[m])) if consistency_map is not None else None
+            if direction_deg is not None and center is not None:
+                if i < len(seed_points) and seed_points[i] is not None:
+                    sx, sy = seed_points[i]
+                    arrow_start = (int(sx), int(sy))
+                else:
+                    arrow_start = center
+                cx, cy = arrow_start
+                if anchor is not None:
+                    ax, ay = anchor
+                    vec_x = float(cx - ax)
+                    vec_y = float(cy - ay)
+                    if abs(vec_x) > 1e-6 or abs(vec_y) > 1e-6:
+                        direction_deg = orient_angle_towards_vector(direction_deg, vec_x, vec_y)
+
+                min_dim = min(vis_area.shape[:2])
+                arrow_length = min_dim * 0.14
+                density_norm = 0.5 if density_mean is None else min(1.0, max(0.0, density_mean / 0.30))
+                consistency_norm = 0.5 if consistency_mean is None else min(1.0, max(0.0, consistency_mean))
+                thickness_score = float(np.sqrt(density_norm * consistency_norm))
+                shaft_width = max(2.0, min_dim * (0.10 * (thickness_score - 0.5)))
+                draw_hollow_arrow(vis_area, arrow_start, direction_deg, arrow_length, shaft_width, color)
+                ys, xs = np.where(m)
+                label_text = f"score={thickness_score:.2f}"
+                label_x = int(np.max(xs)) + 6
+                label_y = int(np.max(ys)) + 18
+                label_x = min(max(5, label_x), vis_area.shape[1] - 120)
+                label_y = min(max(22, label_y), vis_area.shape[0] - 8)
+                cv2.putText(
+                    vis_area,
+                    label_text,
+                    (label_x, label_y),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.72,
+                    (0, 0, 0),
+                    4,
+                    cv2.LINE_AA,
+                )
+                cv2.putText(
+                    vis_area,
+                    label_text,
+                    (label_x, label_y),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.72,
+                    color,
+                    2,
+                    cv2.LINE_AA,
+                )
+
+            area_direction_degs.append(direction_deg)
+            area_density_means.append(density_mean)
+            area_consistency_means.append(consistency_mean)
+        else:
+            area_direction_degs.append(None)
+            area_density_means.append(None)
+            area_consistency_means.append(None)
         if i < len(seed_points) and seed_points[i] is not None:
             sx, sy = seed_points[i]
             cv2.circle(vis_area, (int(sx), int(sy)), 4, (255, 255, 255), -1)
@@ -404,10 +535,6 @@ def draw_outputs(
                 1,
                 cv2.LINE_AA,
             )
-        if i < len(boxes):
-            b = boxes[i]
-            cv2.rectangle(vis_area, (b["x1"], b["y1"]), (b["x2"], b["y2"]), color, 2)
-
     if area_threshold is not None:
         cv2.putText(
             vis_area,
@@ -506,6 +633,12 @@ def draw_outputs(
                 f.write(f"box{i}_constrained_direction_deg={constrained_deg:.6f}\n")
             if i - 1 < len(area_masks) and area_masks[i - 1] is not None:
                 f.write(f"box{i}_connected_area_px={int(np.count_nonzero(area_masks[i - 1]))}\n")
+            if i - 1 < len(area_direction_degs) and area_direction_degs[i - 1] is not None:
+                f.write(f"box{i}_area_direction_deg={area_direction_degs[i - 1]:.6f}\n")
+            if i - 1 < len(area_density_means) and area_density_means[i - 1] is not None:
+                f.write(f"box{i}_area_density_mean={area_density_means[i - 1]:.6f}\n")
+            if i - 1 < len(area_consistency_means) and area_consistency_means[i - 1] is not None:
+                f.write(f"box{i}_area_consistency_mean={area_consistency_means[i - 1]:.6f}\n")
             if i - 1 < len(seed_points) and seed_points[i - 1] is not None:
                 sx, sy = seed_points[i - 1]
                 f.write(f"box{i}_seed_x={int(sx)}\n")
@@ -535,7 +668,7 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    score, mask, orientations, pred, used_radius = compute_score_map(
+    score, mask, orientations, pred, used_radius, density, consistency = compute_score_map(
         image_path=image_path,
         model_path=model_path,
         target_class=args.target_class,
@@ -591,6 +724,9 @@ def main():
         area_masks=area_masks,
         seed_points=seed_points,
         area_threshold=area_threshold,
+        orientations=orientations,
+        density_map=density,
+        consistency_map=consistency,
     )
 
     print("Done.")

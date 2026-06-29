@@ -782,6 +782,9 @@ def run_heatmap_and_worst(
         area_masks=area_masks,
         seed_points=seed_points,
         area_threshold=area_threshold,
+        orientations=result["orientations"],
+        density_map=result["density"],
+        consistency_map=result["consistency"],
     )
 
     return {
