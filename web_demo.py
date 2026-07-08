@@ -63,6 +63,7 @@ PARAM_DEFAULTS = {
     "box_size": 80,
     "num_boxes": 2,
     "min_overlap": 0.30,
+    "area_percentile": 80.0,
 }
 
 
@@ -112,6 +113,7 @@ def normalize_params_dict(raw_data: dict) -> dict:
     data["box_size"] = _clamp_int(int(data.get("box_size", 80)), 24, 240)
     data["num_boxes"] = _clamp_int(int(data.get("num_boxes", 1)), 1, 5)
     data["min_overlap"] = _clamp_float(float(data.get("min_overlap", 0.30)), 0.0, 0.95)
+    data["area_percentile"] = _clamp_float(float(data.get("area_percentile", 80.0)), 0.0, 100.0)
 
     raw_cuts = data.get("presence_cuts", PARAM_DEFAULTS["presence_cuts"])
     if not isinstance(raw_cuts, list):
@@ -135,6 +137,7 @@ def apply_params_to_session(params: dict) -> None:
     st.session_state["p_box_size"] = int(params["box_size"])
     st.session_state["p_num_boxes"] = int(params["num_boxes"])
     st.session_state["p_min_overlap"] = float(params["min_overlap"])
+    st.session_state["p_area_percentile"] = float(params["area_percentile"])
 
     cuts = params["presence_cuts"]
     for i in range(5):
@@ -184,6 +187,7 @@ def build_current_params_snapshot(
     box_size: int | None,
     num_boxes: int,
     min_overlap: float,
+    area_percentile: float,
 ) -> dict:
     snapshot = {
         "model_rel": str(model_rel),
@@ -201,6 +205,7 @@ def build_current_params_snapshot(
         "box_size": int(box_size) if box_size is not None else int(st.session_state.get("p_box_size", 80)),
         "num_boxes": int(num_boxes),
         "min_overlap": float(min_overlap),
+        "area_percentile": float(area_percentile),
     }
     snapshot["presence_cuts"] = _normalize_presence_cuts(snapshot["presence_cuts"], snapshot["n_bins"], snapshot["presence_mode"])
     return snapshot
@@ -221,8 +226,10 @@ def save_params_to_output_dir(
     payload["presence_mode_used"] = str(heat_info.get("presence_mode", payload.get("presence_mode", "threshold")))
     payload["presence_cuts_used"] = [float(v) for v in heat_info.get("presence_cuts", payload.get("presence_cuts", []))]
     payload["presence_thresholds_used"] = [float(v) for v in heat_info.get("presence_thresholds", [])]
-    if "area_threshold_p80" in heat_info:
-        payload["area_threshold_p80"] = float(heat_info["area_threshold_p80"])
+    if "area_percentile" in heat_info:
+        payload["area_percentile_used"] = float(heat_info["area_percentile"])
+    if "area_threshold" in heat_info:
+        payload["area_threshold_used"] = float(heat_info["area_threshold"])
 
     out_path = out_dir / "run_params.json"
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -662,6 +669,7 @@ def run_heatmap_and_worst(
     box_size: int | None,
     num_boxes: int,
     min_overlap: float,
+    area_percentile: float,
     device: str,
 ) -> dict:
     out_dir = OUTPUT_DIR / output_folder
@@ -731,7 +739,8 @@ def run_heatmap_and_worst(
     seed_points = []
     forbidden_area = np.zeros_like(result["region_mask"], dtype=np.uint8)
     vals_inside = result["score_norm"][result["region_mask"] > 0]
-    area_threshold = float(np.quantile(vals_inside, 0.80)) if vals_inside.size > 0 else 0.0
+    area_percentile = _clamp_float(float(area_percentile), 0.0, 100.0)
+    area_threshold = float(np.quantile(vals_inside, area_percentile / 100.0)) if vals_inside.size > 0 else 0.0
     for _ in range(num_boxes):
         try:
             box = find_worst_box(
@@ -782,6 +791,7 @@ def run_heatmap_and_worst(
         area_masks=area_masks,
         seed_points=seed_points,
         area_threshold=area_threshold,
+        area_percentile=area_percentile,
         orientations=result["orientations"],
         density_map=result["density"],
         consistency_map=result["consistency"],
@@ -795,7 +805,8 @@ def run_heatmap_and_worst(
         "presence_mode": presence_mode,
         "presence_cuts": used_cuts,
         "presence_thresholds": presence_thresholds,
-        "area_threshold_p80": area_threshold,
+        "area_percentile": area_percentile,
+        "area_threshold": area_threshold,
     }
 
 
@@ -909,12 +920,18 @@ def render_case_results(case_id: str, output_folder: str, image_size_text: str |
     show_image_with_explain(out_dir / "presence_overlay.png", "Presence Overlay", "将 Presence 分级结果叠加到原图，用于直观查看各档分布范围。")
 
     worst_box_img = sorted(out_dir.glob("*_worst*_box.png"), key=lambda p: p.stat().st_mtime)
-    worst_dir_img = sorted(out_dir.glob("*_worst*_direction.png"), key=lambda p: p.stat().st_mtime)
+    worst_dir_img = sorted(
+        [p for p in out_dir.glob("*_worst*_direction.png") if "_area_direction" not in p.name],
+        key=lambda p: p.stat().st_mtime,
+    )
     worst_area_img = sorted(out_dir.glob("*_worst*_area.png"), key=lambda p: p.stat().st_mtime)
+    worst_area_dir_img = sorted(out_dir.glob("*_worst*_area_direction.png"), key=lambda p: p.stat().st_mtime)
     if worst_box_img:
         show_image_with_explain(worst_box_img[-1], "最严重框", "在目标区域内筛选出的高严重度框，支持1~5个不重叠框。")
     if worst_area_img:
-        show_image_with_explain(worst_area_img[-1], "Worst Area 联通区域", "显示每个最严重框对应的高分联通区域（A=80分位阈值）以及种子点，后续框与这些区域不重叠。")
+        show_image_with_explain(worst_area_img[-1], "Worst Area 联通区域", "显示每个最严重框对应的高分联通区域以及种子点，联通阈值由侧边栏 Worst Area 联通百分位控制。")
+    if worst_area_dir_img:
+        show_image_with_explain(worst_area_dir_img[-1], "Worst Area 方向图", "在 Worst Area 联通区域上增加从最严重点出发的空心方向箭头和评分标注。")
     if worst_dir_img:
         show_image_with_explain(worst_dir_img[-1], "框内方向", "在最严重框中心绘制主方向箭头，反映该区域主要纹理方向。")
 
@@ -1176,6 +1193,15 @@ def app():
         key="p_min_overlap",
         help="候选框中有效区域像素占比下限。值越大，框越集中在目标区域内。",
     )
+    area_percentile = st.sidebar.number_input(
+        "Worst Area联通百分位",
+        min_value=0.0,
+        max_value=100.0,
+        step=1.0,
+        format="%.1f",
+        key="p_area_percentile",
+        help="提取 Worst Area 联通区域时使用的分位数阈值。默认80表示保留分数最高约20%的高分区域。",
+    )
     num_boxes = int(num_boxes)
     if fixed_radius is not None:
         fixed_radius = int(fixed_radius)
@@ -1232,6 +1258,7 @@ def app():
             box_size=box_size,
             num_boxes=num_boxes,
             min_overlap=min_overlap,
+            area_percentile=area_percentile,
         )
         with st.spinner("正在生成全流程中间结果..."):
             image_path = Path(st.session_state["image_path"])
@@ -1256,6 +1283,7 @@ def app():
                 box_size=box_size,
                 num_boxes=num_boxes,
                 min_overlap=min_overlap,
+                area_percentile=area_percentile,
                 device=device,
             )
         st.success(f"完成。radius={heat_info['radius']}，box_size={heat_info['box_size']}")
@@ -1301,6 +1329,7 @@ def app():
             box_size=box_size,
             num_boxes=num_boxes,
             min_overlap=min_overlap,
+            area_percentile=area_percentile,
         )
         with st.spinner("正在按新参数重算热图和最严重框..."):
             image_path = Path(st.session_state["image_path"])
@@ -1324,6 +1353,7 @@ def app():
                 box_size=box_size,
                 num_boxes=num_boxes,
                 min_overlap=min_overlap,
+                area_percentile=area_percentile,
                 device=device,
             )
         st.success(f"重算完成。radius={heat_info['radius']}，box_size={heat_info['box_size']}")
@@ -1366,6 +1396,7 @@ def app():
             box_size=box_size,
             num_boxes=num_boxes,
             min_overlap=min_overlap,
+            area_percentile=area_percentile,
         )
 
         batch_id = new_batch_id()
@@ -1404,6 +1435,7 @@ def app():
                         box_size=box_size,
                         num_boxes=num_boxes,
                         min_overlap=min_overlap,
+                        area_percentile=area_percentile,
                         device=device,
                     )
                     save_params_to_output_dir(

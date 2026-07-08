@@ -379,6 +379,7 @@ def draw_outputs(
     area_masks: list[np.ndarray] | None = None,
     seed_points: list[tuple[int, int] | None] | None = None,
     area_threshold: float | None = None,
+    area_percentile: float | None = None,
     orientations: np.ndarray | None = None,
     density_map: np.ndarray | None = None,
     consistency_map: np.ndarray | None = None,
@@ -387,8 +388,8 @@ def draw_outputs(
     if img is None:
         raise FileNotFoundError(f"Cannot read image: {image_path}")
 
-    # Draw both mask boundaries on top of the original image.
-    # class 1 (affected area): green, class 2 (keloid body): cyan.
+    # Draw effective-mask boundaries using the same visual rule as web_demo:
+    # outer boundary -> green, inner hole boundaries -> red.
     # Prefer post-processed class1 mask to keep visualization consistent with scoring.
     class1_source = "raw_pred_class1"
     if region_mask is not None:
@@ -402,17 +403,44 @@ def draw_outputs(
         # Fallback to class1 center if class2 is absent.
         anchor = axis_aligned_bbox_center(class1)
 
+    def blend_pixels(canvas: np.ndarray, mask: np.ndarray, color: tuple[int, int, int], alpha: float):
+        m = mask > 0
+        if not np.any(m):
+            return
+        for c in range(3):
+            canvas[:, :, c][m] = ((1.0 - alpha) * canvas[:, :, c][m] + alpha * color[c]).astype(np.uint8)
+
     def draw_boundary_like_segmentation(canvas: np.ndarray, binary_mask: np.ndarray):
         contours, hierarchy = cv2.findContours(binary_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+        outer_color = (0, 255, 0)
+        inner_color = (0, 0, 255)
         if hierarchy is not None:
             hier = hierarchy[0]
+            outer_fill_mask = np.zeros(binary_mask.shape, dtype=np.uint8)
+            inner_fill_mask = np.zeros(binary_mask.shape, dtype=np.uint8)
             for i, cnt in enumerate(contours):
                 parent = hier[i][3]
-                color = (0, 255, 0) if parent == -1 else (255, 0, 0)
-                cv2.drawContours(canvas, [cnt], -1, color, 2)
+                color = outer_color if parent == -1 else inner_color
+                line_alpha = 0.55
+
+                if parent == -1:
+                    cv2.drawContours(outer_fill_mask, [cnt], -1, 1, thickness=cv2.FILLED)
+                else:
+                    cv2.drawContours(inner_fill_mask, [cnt], -1, 1, thickness=cv2.FILLED)
+
+                line_mask = np.zeros(binary_mask.shape, dtype=np.uint8)
+                cv2.drawContours(line_mask, [cnt], -1, 1, thickness=2)
+                blend_pixels(canvas, line_mask, color, line_alpha)
+            outer_fill_mask[inner_fill_mask > 0] = 0
+            blend_pixels(canvas, outer_fill_mask, outer_color, 0.12)
         else:
             contours_ext, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            cv2.drawContours(canvas, contours_ext, -1, (0, 255, 0), 2)
+            fill_mask = np.zeros(binary_mask.shape, dtype=np.uint8)
+            line_mask = np.zeros(binary_mask.shape, dtype=np.uint8)
+            cv2.drawContours(fill_mask, contours_ext, -1, 1, thickness=cv2.FILLED)
+            cv2.drawContours(line_mask, contours_ext, -1, 1, thickness=2)
+            blend_pixels(canvas, fill_mask, outer_color, 0.12)
+            blend_pixels(canvas, line_mask, outer_color, 0.55)
 
     if len(boxes) == 0:
         raise RuntimeError("No boxes to draw.")
@@ -439,13 +467,14 @@ def draw_outputs(
     vis_dir = vis_box.copy()
     vis_area = img.copy()
     draw_boundary_like_segmentation(vis_area, class1)
+    vis_area_direction = vis_area.copy()
 
     if area_masks is None:
         area_masks = []
     if seed_points is None:
         seed_points = []
 
-    area_colors = [(70, 70, 255), (255, 70, 70), (70, 220, 220), (220, 70, 220), (70, 220, 120)]
+    area_red_levels = [255, 220, 185, 150, 115]
     area_direction_degs: list[float | None] = []
     area_density_means: list[float | None] = []
     area_consistency_means: list[float | None] = []
@@ -455,13 +484,17 @@ def draw_outputs(
             area_density_means.append(None)
             area_consistency_means.append(None)
             continue
-        color = area_colors[i % len(area_colors)]
+        red_level = area_red_levels[min(i, len(area_red_levels) - 1)]
+        color = (0, 0, red_level)
+        overlay_alpha = max(0.18, 0.45 - 0.06 * i)
         m = (a > 0)
         if np.any(m):
-            for c in range(3):
-                vis_area[:, :, c][m] = (0.55 * vis_area[:, :, c][m] + 0.45 * color[c]).astype(np.uint8)
+            for canvas in (vis_area, vis_area_direction):
+                for c in range(3):
+                    canvas[:, :, c][m] = ((1.0 - overlay_alpha) * canvas[:, :, c][m] + overlay_alpha * color[c]).astype(np.uint8)
             contours_a, _ = cv2.findContours((a > 0).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(vis_area, contours_a, -1, color, 2)
+            cv2.drawContours(vis_area_direction, contours_a, -1, color, 2)
 
             direction_deg = mean_orientation_degrees_for_mask(orientations, a) if orientations is not None else None
             center = axis_aligned_bbox_center(a)
@@ -487,34 +520,7 @@ def draw_outputs(
                 consistency_norm = 0.5 if consistency_mean is None else min(1.0, max(0.0, consistency_mean))
                 thickness_score = float(np.sqrt(density_norm * consistency_norm))
                 shaft_width = max(2.0, min_dim * (0.10 * (thickness_score - 0.5)))
-                draw_hollow_arrow(vis_area, arrow_start, direction_deg, arrow_length, shaft_width, color)
-                ys, xs = np.where(m)
-                label_text = f"score={thickness_score:.2f}"
-                label_x = int(np.max(xs)) + 6
-                label_y = int(np.max(ys)) + 18
-                label_x = min(max(5, label_x), vis_area.shape[1] - 120)
-                label_y = min(max(22, label_y), vis_area.shape[0] - 8)
-                cv2.putText(
-                    vis_area,
-                    label_text,
-                    (label_x, label_y),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.72,
-                    (0, 0, 0),
-                    4,
-                    cv2.LINE_AA,
-                )
-                cv2.putText(
-                    vis_area,
-                    label_text,
-                    (label_x, label_y),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.72,
-                    color,
-                    2,
-                    cv2.LINE_AA,
-                )
-
+                draw_hollow_arrow(vis_area_direction, arrow_start, direction_deg, arrow_length, shaft_width, color)
             area_direction_degs.append(direction_deg)
             area_density_means.append(density_mean)
             area_consistency_means.append(consistency_mean)
@@ -524,28 +530,8 @@ def draw_outputs(
             area_consistency_means.append(None)
         if i < len(seed_points) and seed_points[i] is not None:
             sx, sy = seed_points[i]
-            cv2.circle(vis_area, (int(sx), int(sy)), 4, (255, 255, 255), -1)
-            cv2.putText(
-                vis_area,
-                f"S{i+1}",
-                (int(sx) + 6, max(14, int(sy) - 6)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                (255, 255, 255),
-                1,
-                cv2.LINE_AA,
-            )
-    if area_threshold is not None:
-        cv2.putText(
-            vis_area,
-            f"A(p80)={area_threshold:.4f}",
-            (10, 24),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (255, 255, 255),
-            2,
-            cv2.LINE_AA,
-        )
+            for canvas in (vis_area, vis_area_direction):
+                cv2.circle(canvas, (int(sx), int(sy)), 4, (255, 255, 255), -1)
     constrained_degs: list[float | None] = []
     for i, box in enumerate(boxes):
         mean_deg = mean_degs[i] if i < len(mean_degs) else None
@@ -600,6 +586,7 @@ def draw_outputs(
     cv2.imwrite(str(out_dir / f"{image_path.stem}_worst{box_size}_box.png"), vis_box)
     cv2.imwrite(str(out_dir / f"{image_path.stem}_worst{box_size}_direction.png"), vis_dir)
     cv2.imwrite(str(out_dir / f"{image_path.stem}_worst{box_size}_area.png"), vis_area)
+    cv2.imwrite(str(out_dir / f"{image_path.stem}_worst{box_size}_area_direction.png"), vis_area_direction)
 
     with (out_dir / f"{image_path.stem}_worst{box_size}_info.txt").open("w", encoding="utf-8") as f:
         f.write(f"image={image_path.stem}\n")
@@ -607,8 +594,10 @@ def draw_outputs(
         f.write(f"num_boxes={len(boxes)}\n")
         f.write(f"class1_boundary_source={class1_source}\n")
         f.write(f"class1_boundary_area_px={int(np.count_nonzero(class1))}\n")
+        if area_percentile is not None:
+            f.write(f"area_threshold_percentile={area_percentile:.2f}\n")
         if area_threshold is not None:
-            f.write(f"area_threshold_p80={area_threshold:.6f}\n")
+            f.write(f"area_threshold={area_threshold:.6f}\n")
         for i, box in enumerate(boxes, start=1):
             f.write(f"box{i}_x1={box['x1']}\n")
             f.write(f"box{i}_y1={box['y1']}\n")
@@ -657,6 +646,7 @@ def main():
     parser.add_argument("--num-boxes", type=int, default=1, choices=[1, 2, 3, 4, 5], help="Number of non-overlapping boxes")
     parser.add_argument("--min-overlap", type=float, default=0.30, help="Minimum mask overlap ratio for candidate boxes")
     parser.add_argument("--overlap-power", type=float, default=0.35, help="Soft overlap weighting exponent in objective")
+    parser.add_argument("--area-percentile", type=float, default=80.0, help="Percentile threshold for connected worst area extraction")
     parser.add_argument("--model", default="best_trans_unet_model_20250614_122913.pth", help="Model checkpoint")
     parser.add_argument("--output-subdir", default="r40", help="Output folder under heatmap_output/<num>/")
     args = parser.parse_args()
@@ -688,7 +678,8 @@ def main():
     seed_points: list[tuple[int, int] | None] = []
     forbidden_area = np.zeros_like(mask, dtype=np.uint8)
     vals_inside = score[mask > 0]
-    area_threshold = float(np.quantile(vals_inside, 0.80)) if vals_inside.size > 0 else 0.0
+    area_percentile = float(np.clip(args.area_percentile, 0.0, 100.0))
+    area_threshold = float(np.quantile(vals_inside, area_percentile / 100.0)) if vals_inside.size > 0 else 0.0
     for _ in range(args.num_boxes):
         try:
             box = find_worst_box(
@@ -724,6 +715,7 @@ def main():
         area_masks=area_masks,
         seed_points=seed_points,
         area_threshold=area_threshold,
+        area_percentile=area_percentile,
         orientations=orientations,
         density_map=density,
         consistency_map=consistency,
