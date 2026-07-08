@@ -474,7 +474,13 @@ def draw_outputs(
     if seed_points is None:
         seed_points = []
 
-    area_red_levels = [255, 220, 185, 150, 115]
+    area_colors = [
+        (0, 0, 255),      # red: most severe
+        (0, 80, 255),     # orange-red
+        (0, 150, 255),    # orange
+        (0, 220, 255),    # yellow-orange
+        (0, 255, 255),    # yellow
+    ]
     area_direction_degs: list[float | None] = []
     area_density_means: list[float | None] = []
     area_consistency_means: list[float | None] = []
@@ -484,8 +490,7 @@ def draw_outputs(
             area_density_means.append(None)
             area_consistency_means.append(None)
             continue
-        red_level = area_red_levels[min(i, len(area_red_levels) - 1)]
-        color = (0, 0, red_level)
+        color = area_colors[min(i, len(area_colors) - 1)]
         overlay_alpha = max(0.18, 0.45 - 0.06 * i)
         m = (a > 0)
         if np.any(m):
