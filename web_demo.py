@@ -64,6 +64,7 @@ PARAM_DEFAULTS = {
     "num_boxes": 2,
     "min_overlap": 0.30,
     "area_percentile": 80.0,
+    "local_direction_radius": 40,
 }
 
 
@@ -114,6 +115,7 @@ def normalize_params_dict(raw_data: dict) -> dict:
     data["num_boxes"] = _clamp_int(int(data.get("num_boxes", 1)), 1, 5)
     data["min_overlap"] = _clamp_float(float(data.get("min_overlap", 0.30)), 0.0, 0.95)
     data["area_percentile"] = _clamp_float(float(data.get("area_percentile", 80.0)), 0.0, 100.0)
+    data["local_direction_radius"] = _clamp_int(int(data.get("local_direction_radius", 40)), 1, 240)
 
     raw_cuts = data.get("presence_cuts", PARAM_DEFAULTS["presence_cuts"])
     if not isinstance(raw_cuts, list):
@@ -138,6 +140,7 @@ def apply_params_to_session(params: dict) -> None:
     st.session_state["p_num_boxes"] = int(params["num_boxes"])
     st.session_state["p_min_overlap"] = float(params["min_overlap"])
     st.session_state["p_area_percentile"] = float(params["area_percentile"])
+    st.session_state["p_local_direction_radius"] = int(params["local_direction_radius"])
 
     cuts = params["presence_cuts"]
     for i in range(5):
@@ -188,6 +191,7 @@ def build_current_params_snapshot(
     num_boxes: int,
     min_overlap: float,
     area_percentile: float,
+    local_direction_radius: int,
 ) -> dict:
     snapshot = {
         "model_rel": str(model_rel),
@@ -206,6 +210,7 @@ def build_current_params_snapshot(
         "num_boxes": int(num_boxes),
         "min_overlap": float(min_overlap),
         "area_percentile": float(area_percentile),
+        "local_direction_radius": int(local_direction_radius),
     }
     snapshot["presence_cuts"] = _normalize_presence_cuts(snapshot["presence_cuts"], snapshot["n_bins"], snapshot["presence_mode"])
     return snapshot
@@ -230,6 +235,8 @@ def save_params_to_output_dir(
         payload["area_percentile_used"] = float(heat_info["area_percentile"])
     if "area_threshold" in heat_info:
         payload["area_threshold_used"] = float(heat_info["area_threshold"])
+    if "local_direction_radius" in heat_info:
+        payload["local_direction_radius_used"] = int(heat_info["local_direction_radius"])
 
     out_path = out_dir / "run_params.json"
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -670,8 +677,10 @@ def run_heatmap_and_worst(
     num_boxes: int,
     min_overlap: float,
     area_percentile: float,
+    local_direction_radius: int,
     device: str,
 ) -> dict:
+    local_direction_radius = _clamp_int(int(local_direction_radius), 1, 240)
     out_dir = OUTPUT_DIR / output_folder
     out_dir.mkdir(parents=True, exist_ok=True)
     original_copy = copy_original_to_output(image_path, out_dir, original_name)
@@ -795,6 +804,7 @@ def run_heatmap_and_worst(
         orientations=result["orientations"],
         density_map=result["density"],
         consistency_map=result["consistency"],
+        local_direction_radius=local_direction_radius,
     )
 
     return {
@@ -807,6 +817,7 @@ def run_heatmap_and_worst(
         "presence_thresholds": presence_thresholds,
         "area_percentile": area_percentile,
         "area_threshold": area_threshold,
+        "local_direction_radius": local_direction_radius,
     }
 
 
@@ -921,17 +932,23 @@ def render_case_results(case_id: str, output_folder: str, image_size_text: str |
 
     worst_box_img = sorted(out_dir.glob("*_worst*_box.png"), key=lambda p: p.stat().st_mtime)
     worst_dir_img = sorted(
-        [p for p in out_dir.glob("*_worst*_direction.png") if "_area_direction" not in p.name],
+        [p for p in out_dir.glob("*_worst*_direction.png") if "_area_" not in p.name],
         key=lambda p: p.stat().st_mtime,
     )
     worst_area_img = sorted(out_dir.glob("*_worst*_area.png"), key=lambda p: p.stat().st_mtime)
     worst_area_dir_img = sorted(out_dir.glob("*_worst*_area_direction.png"), key=lambda p: p.stat().st_mtime)
+    worst_area_local_dir_img = sorted(
+        out_dir.glob("*_worst*_area_local_direction.png"),
+        key=lambda p: p.stat().st_mtime,
+    )
     if worst_box_img:
         show_image_with_explain(worst_box_img[-1], "最严重框", "在目标区域内筛选出的高严重度框，支持1~5个不重叠框。")
     if worst_area_img:
         show_image_with_explain(worst_area_img[-1], "Worst Area 联通区域", "显示每个最严重框对应的高分联通区域以及种子点，联通阈值由侧边栏 Worst Area 联通百分位控制。")
     if worst_area_dir_img:
-        show_image_with_explain(worst_area_dir_img[-1], "Worst Area 方向图", "在 Worst Area 联通区域上增加从最严重点出发的空心方向箭头和评分标注。")
+        show_image_with_explain(worst_area_dir_img[-1], "Worst Area 方向图", "箭头从外层边界内侧 10 像素约束带中的最严重点出发，方向取整个 Worst Area 的平均纹理方向。")
+    if worst_area_local_dir_img:
+        show_image_with_explain(worst_area_local_dir_img[-1], "Worst Area 局部方向图", "箭头起点使用同一边界约束，方向取起点附近“局部箭头方向半径”像素圆形邻域的平均纹理方向。")
     if worst_dir_img:
         show_image_with_explain(worst_dir_img[-1], "框内方向", "在最严重框中心绘制主方向箭头，反映该区域主要纹理方向。")
 
@@ -1202,7 +1219,16 @@ def app():
         key="p_area_percentile",
         help="提取 Worst Area 联通区域时使用的分位数阈值。默认80表示保留分数最高约20%的高分区域。",
     )
+    local_direction_radius = st.sidebar.number_input(
+        "局部箭头方向半径",
+        min_value=1,
+        max_value=240,
+        step=1,
+        key="p_local_direction_radius",
+        help="仅控制 Worst Area 局部方向图：统计箭头起点周围多少像素半径内的平均纹理方向，不影响热图。",
+    )
     num_boxes = int(num_boxes)
+    local_direction_radius = int(local_direction_radius)
     if fixed_radius is not None:
         fixed_radius = int(fixed_radius)
     if box_size is not None:
@@ -1215,7 +1241,8 @@ def app():
             "- 纹理像素阈值：决定哪些像素计入纹理密度。\n"
             "- 密度/一致性权重：共同决定严重度分数。\n"
             "- Presence模式：threshold按固定分数切，quantile按分位切。\n"
-            "- Box参数：控制最严重框的大小、数量和有效区域约束。"
+            "- Box参数：控制最严重框的大小、数量和有效区域约束。\n"
+            "- 局部箭头方向半径：只控制箭头起点附近的方向统计范围，与 Heatmap Radius 独立。"
         )
 
     st.sidebar.markdown('<div class="floating-actions">', unsafe_allow_html=True)
@@ -1259,6 +1286,7 @@ def app():
             num_boxes=num_boxes,
             min_overlap=min_overlap,
             area_percentile=area_percentile,
+            local_direction_radius=local_direction_radius,
         )
         with st.spinner("正在生成全流程中间结果..."):
             image_path = Path(st.session_state["image_path"])
@@ -1284,6 +1312,7 @@ def app():
                 num_boxes=num_boxes,
                 min_overlap=min_overlap,
                 area_percentile=area_percentile,
+                local_direction_radius=local_direction_radius,
                 device=device,
             )
         st.success(f"完成。radius={heat_info['radius']}，box_size={heat_info['box_size']}")
@@ -1330,6 +1359,7 @@ def app():
             num_boxes=num_boxes,
             min_overlap=min_overlap,
             area_percentile=area_percentile,
+            local_direction_radius=local_direction_radius,
         )
         with st.spinner("正在按新参数重算热图和最严重框..."):
             image_path = Path(st.session_state["image_path"])
@@ -1354,6 +1384,7 @@ def app():
                 num_boxes=num_boxes,
                 min_overlap=min_overlap,
                 area_percentile=area_percentile,
+                local_direction_radius=local_direction_radius,
                 device=device,
             )
         st.success(f"重算完成。radius={heat_info['radius']}，box_size={heat_info['box_size']}")
@@ -1397,6 +1428,7 @@ def app():
             num_boxes=num_boxes,
             min_overlap=min_overlap,
             area_percentile=area_percentile,
+            local_direction_radius=local_direction_radius,
         )
 
         batch_id = new_batch_id()
@@ -1436,6 +1468,7 @@ def app():
                         num_boxes=num_boxes,
                         min_overlap=min_overlap,
                         area_percentile=area_percentile,
+                        local_direction_radius=local_direction_radius,
                         device=device,
                     )
                     save_params_to_output_dir(

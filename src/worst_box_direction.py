@@ -233,7 +233,7 @@ def extract_connected_high_area(
     box: dict,
     threshold: float,
 ) -> tuple[np.ndarray, tuple[int, int] | None, float | None]:
-    """From a box, pick the max-score seed and keep its connected component above threshold."""
+    """Extract the seeded component and choose its arrow start near the outer boundary."""
     h, w = score.shape
     out = np.zeros((h, w), dtype=np.uint8)
 
@@ -271,7 +271,32 @@ def extract_connected_high_area(
         cv2.drawContours(filled, contours, -1, 1, thickness=cv2.FILLED)
         out = filled
     out = ((out > 0) & (mask > 0)).astype(np.uint8)
-    return out, (sx, sy), seed_val
+
+    # Constrain the displayed arrow start to the 10 px band immediately inside
+    # the effective mask's outer boundary. Inner-hole boundaries are excluded.
+    outer_filled = np.zeros_like(out)
+    outer_contours, _ = cv2.findContours(
+        (mask > 0).astype(np.uint8),
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+    if outer_contours:
+        cv2.drawContours(outer_filled, outer_contours, -1, 1, thickness=cv2.FILLED)
+    distance_inside = cv2.distanceTransform(outer_filled, cv2.DIST_L2, 5)
+    boundary_band = (outer_filled > 0) & (distance_inside <= 10.0) & (mask > 0)
+    candidates = (out > 0) & boundary_band
+    if not np.any(candidates):
+        candidates = out > 0
+
+    if np.any(candidates):
+        candidate_scores = np.where(candidates, score, -np.inf)
+        start_y, start_x = np.unravel_index(int(np.argmax(candidate_scores)), score.shape)
+        start_point = (int(start_x), int(start_y))
+        start_val = float(score[start_y, start_x])
+    else:
+        start_point = (sx, sy)
+        start_val = seed_val
+    return out, start_point, start_val
 
 
 def mean_orientation_degrees(orientations: np.ndarray, mask: np.ndarray, box):
@@ -305,6 +330,24 @@ def mean_orientation_degrees_for_mask(orientations: np.ndarray, mask: np.ndarray
     mean_doubled = float(np.arctan2(ms, mc))
     mean_angle = (mean_doubled / 2.0) % np.pi
     return float(np.degrees(mean_angle))
+
+
+def mean_orientation_degrees_near_point(
+    orientations: np.ndarray,
+    region_mask: np.ndarray,
+    point: tuple[int, int],
+    radius: int,
+) -> float | None:
+    """Compute axial mean orientation within a disk around point."""
+    h, w = orientations.shape
+    cx, cy = point
+    radius = max(1, int(radius))
+    x1, x2 = max(0, cx - radius), min(w, cx + radius + 1)
+    y1, y2 = max(0, cy - radius), min(h, cy + radius + 1)
+    yy, xx = np.ogrid[y1:y2, x1:x2]
+    disk = ((xx - cx) ** 2 + (yy - cy) ** 2) <= radius * radius
+    local_mask = disk & (region_mask[y1:y2, x1:x2] > 0)
+    return mean_orientation_degrees_for_mask(orientations[y1:y2, x1:x2], local_mask)
 
 
 def axis_aligned_bbox_center(binary_mask: np.ndarray) -> tuple[int, int] | None:
@@ -383,6 +426,7 @@ def draw_outputs(
     orientations: np.ndarray | None = None,
     density_map: np.ndarray | None = None,
     consistency_map: np.ndarray | None = None,
+    local_direction_radius: int | None = None,
 ):
     img = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if img is None:
@@ -468,6 +512,7 @@ def draw_outputs(
     vis_area = img.copy()
     draw_boundary_like_segmentation(vis_area, class1)
     vis_area_direction = vis_area.copy()
+    vis_area_local_direction = vis_area.copy()
 
     if area_masks is None:
         area_masks = []
@@ -494,12 +539,13 @@ def draw_outputs(
         overlay_alpha = max(0.18, 0.45 - 0.06 * i)
         m = (a > 0)
         if np.any(m):
-            for canvas in (vis_area, vis_area_direction):
+            for canvas in (vis_area, vis_area_direction, vis_area_local_direction):
                 for c in range(3):
                     canvas[:, :, c][m] = ((1.0 - overlay_alpha) * canvas[:, :, c][m] + overlay_alpha * color[c]).astype(np.uint8)
             contours_a, _ = cv2.findContours((a > 0).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(vis_area, contours_a, -1, color, 2)
             cv2.drawContours(vis_area_direction, contours_a, -1, color, 2)
+            cv2.drawContours(vis_area_local_direction, contours_a, -1, color, 2)
 
             direction_deg = mean_orientation_degrees_for_mask(orientations, a) if orientations is not None else None
             center = axis_aligned_bbox_center(a)
@@ -526,6 +572,28 @@ def draw_outputs(
                 thickness_score = float(np.sqrt(density_norm * consistency_norm))
                 shaft_width = max(2.0, min_dim * (0.10 * (thickness_score - 0.5)))
                 draw_hollow_arrow(vis_area_direction, arrow_start, direction_deg, arrow_length, shaft_width, color)
+                if local_direction_radius is not None and orientations is not None:
+                    local_direction_deg = mean_orientation_degrees_near_point(
+                        orientations,
+                        class1,
+                        arrow_start,
+                        local_direction_radius,
+                    )
+                    if local_direction_deg is not None:
+                        if anchor is not None:
+                            ax, ay = anchor
+                            vec_x = float(cx - ax)
+                            vec_y = float(cy - ay)
+                            if abs(vec_x) > 1e-6 or abs(vec_y) > 1e-6:
+                                local_direction_deg = orient_angle_towards_vector(local_direction_deg, vec_x, vec_y)
+                        draw_hollow_arrow(
+                            vis_area_local_direction,
+                            arrow_start,
+                            local_direction_deg,
+                            arrow_length,
+                            shaft_width,
+                            color,
+                        )
             area_direction_degs.append(direction_deg)
             area_density_means.append(density_mean)
             area_consistency_means.append(consistency_mean)
@@ -535,7 +603,7 @@ def draw_outputs(
             area_consistency_means.append(None)
         if i < len(seed_points) and seed_points[i] is not None:
             sx, sy = seed_points[i]
-            for canvas in (vis_area, vis_area_direction):
+            for canvas in (vis_area, vis_area_direction, vis_area_local_direction):
                 cv2.circle(canvas, (int(sx), int(sy)), 4, (255, 255, 255), -1)
     constrained_degs: list[float | None] = []
     for i, box in enumerate(boxes):
@@ -592,6 +660,10 @@ def draw_outputs(
     cv2.imwrite(str(out_dir / f"{image_path.stem}_worst{box_size}_direction.png"), vis_dir)
     cv2.imwrite(str(out_dir / f"{image_path.stem}_worst{box_size}_area.png"), vis_area)
     cv2.imwrite(str(out_dir / f"{image_path.stem}_worst{box_size}_area_direction.png"), vis_area_direction)
+    cv2.imwrite(
+        str(out_dir / f"{image_path.stem}_worst{box_size}_area_local_direction.png"),
+        vis_area_local_direction,
+    )
 
     with (out_dir / f"{image_path.stem}_worst{box_size}_info.txt").open("w", encoding="utf-8") as f:
         f.write(f"image={image_path.stem}\n")
@@ -603,6 +675,8 @@ def draw_outputs(
             f.write(f"area_threshold_percentile={area_percentile:.2f}\n")
         if area_threshold is not None:
             f.write(f"area_threshold={area_threshold:.6f}\n")
+        if local_direction_radius is not None:
+            f.write(f"area_local_direction_radius={int(local_direction_radius)}\n")
         for i, box in enumerate(boxes, start=1):
             f.write(f"box{i}_x1={box['x1']}\n")
             f.write(f"box{i}_y1={box['y1']}\n")
@@ -652,6 +726,12 @@ def main():
     parser.add_argument("--min-overlap", type=float, default=0.30, help="Minimum mask overlap ratio for candidate boxes")
     parser.add_argument("--overlap-power", type=float, default=0.35, help="Soft overlap weighting exponent in objective")
     parser.add_argument("--area-percentile", type=float, default=80.0, help="Percentile threshold for connected worst area extraction")
+    parser.add_argument(
+        "--local-direction-radius",
+        type=int,
+        default=40,
+        help="Radius in pixels for the arrow-start local orientation",
+    )
     parser.add_argument("--model", default="best_trans_unet_model_20250614_122913.pth", help="Model checkpoint")
     parser.add_argument("--output-subdir", default="r40", help="Output folder under heatmap_output/<num>/")
     args = parser.parse_args()
@@ -724,6 +804,7 @@ def main():
         orientations=orientations,
         density_map=density,
         consistency_map=consistency,
+        local_direction_radius=max(1, int(args.local_direction_radius)),
     )
 
     print("Done.")
