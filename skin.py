@@ -216,25 +216,14 @@ def analyze_skin_texture(image_path, model_path='best_trans_unet_model_20250614_
     # 新增：提前定义base_name
     base_name = os.path.basename(image_path).split('.')[0]
     
-    # 修改单独保存纹理线条图部分（添加掩模应用）
-    # 使用面向对象接口，避免 pyplot 当前轴状态在某些环境下错乱。
-    fig1, ax1 = plt.subplots(figsize=(8, 8))
-
     # 应用收缩后的掩模
     refined_lines = cv2.bitwise_and(texture_lines, texture_lines, mask=shrunk_mask)
-
-    ax1.imshow(refined_lines, cmap='gray')
-    ax1.axis('off')
     line_only_path = os.path.join(output_dir, f"only_texture_line_{base_name}.png")
-    
-    # 关键修改：添加保存参数
-    fig1.savefig(line_only_path,
-                 bbox_inches='tight',
-                 pad_inches=0,
-                 facecolor='none',
-                 transparent=True)
-
-    plt.close(fig1)  # 关闭当前figure释放内存
+    # 保存原尺寸0/255单通道计算图，避免Matplotlib改变尺寸、灰度和线宽。
+    ok, encoded = cv2.imencode('.png', refined_lines)
+    if not ok:
+        raise RuntimeError(f"纹理线条图编码失败: {line_only_path}")
+    encoded.tofile(line_only_path)
     
     # 创建线条可视化
     fig2, axes = plt.subplots(1, 3, figsize=(15, 8))

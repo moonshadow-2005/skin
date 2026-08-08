@@ -76,14 +76,13 @@ def compute_score_map(image_path: Path, model_path: Path, target_class: int, rad
         radius = dynamic_radius_from_size(h, w)
 
     kernel = build_disk_kernel(radius)
-    tex_norm = tex.astype(np.float32) / 255.0
-    texture_binary = ((tex_norm > 0.4) & (region_mask > 0)).astype(np.float32)
+    texture_binary = ((tex > 0) & (region_mask > 0)).astype(np.float32)
     region_mask_f = region_mask.astype(np.float32)
 
     valid_count = cv2.filter2D(region_mask_f, -1, kernel, borderType=cv2.BORDER_CONSTANT)
     texture_count = cv2.filter2D(texture_binary, -1, kernel, borderType=cv2.BORDER_CONSTANT)
 
-    density = np.zeros_like(tex_norm, dtype=np.float32)
+    density = np.zeros_like(texture_binary, dtype=np.float32)
     valid_local = valid_count > 1e-6
     density[valid_local] = texture_count[valid_local] / valid_count[valid_local]
 
@@ -98,10 +97,10 @@ def compute_score_map(image_path: Path, model_path: Path, target_class: int, rad
     sum_cos = cv2.filter2D(cos2, -1, kernel, borderType=cv2.BORDER_CONSTANT)
     sum_sin = cv2.filter2D(sin2, -1, kernel, borderType=cv2.BORDER_CONSTANT)
 
-    consistency = np.zeros_like(tex_norm, dtype=np.float32)
+    consistency = np.zeros_like(texture_binary, dtype=np.float32)
     ok = cnt > 1e-6
-    mean_cos = np.zeros_like(tex_norm, dtype=np.float32)
-    mean_sin = np.zeros_like(tex_norm, dtype=np.float32)
+    mean_cos = np.zeros_like(texture_binary, dtype=np.float32)
+    mean_sin = np.zeros_like(texture_binary, dtype=np.float32)
     mean_cos[ok] = sum_cos[ok] / cnt[ok]
     mean_sin[ok] = sum_sin[ok] / cnt[ok]
     consistency[ok] = np.sqrt(mean_cos[ok] ** 2 + mean_sin[ok] ** 2)

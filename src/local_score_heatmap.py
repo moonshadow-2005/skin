@@ -137,7 +137,15 @@ def compute_orientations(gray_img: np.ndarray, valid_mask: np.ndarray) -> np.nda
     j12 = cv2.GaussianBlur(j12, ksize, sigma)
 
     orientations = np.full(gray_img.shape, np.nan, dtype=np.float32)
-    ys, xs = np.where(valid_mask > 0)
+    energy = j11 + j22
+    valid = valid_mask > 0
+    if not np.any(valid):
+        return orientations
+    max_energy = float(np.max(energy[valid]))
+    if max_energy <= 0.0:
+        return orientations
+    energy_threshold = max(float(np.finfo(np.float32).eps), max_energy * 1e-6)
+    ys, xs = np.where(valid & (energy > energy_threshold))
     for y, x in zip(ys, xs):
         st = np.array([[j11[y, x], j12[y, x]], [j12[y, x], j22[y, x]]], dtype=np.float32)
         eigvals, eigvecs = np.linalg.eigh(st)
@@ -323,14 +331,13 @@ def run_for_id(
     else:
         print(f"Fixed radius: {radius} (image size: {w}x{h})")
 
-    tex_norm = tex.astype(np.float32) / 255.0
-    texture_binary = ((tex_norm > 0.4) & (region_mask > 0)).astype(np.float32)
+    texture_binary = ((tex > 0) & (region_mask > 0)).astype(np.float32)
     region_mask_f = region_mask.astype(np.float32)
 
     # Local texture density.
     valid_count = cv2.filter2D(region_mask_f, -1, kernel, borderType=cv2.BORDER_CONSTANT)
     texture_count = cv2.filter2D(texture_binary, -1, kernel, borderType=cv2.BORDER_CONSTANT)
-    density = np.zeros_like(tex_norm, dtype=np.float32)
+    density = np.zeros_like(texture_binary, dtype=np.float32)
     valid_local = valid_count > 1e-6
     density[valid_local] = texture_count[valid_local] / valid_count[valid_local]
 
@@ -346,10 +353,10 @@ def run_for_id(
     sum_cos = cv2.filter2D(cos2, -1, kernel, borderType=cv2.BORDER_CONSTANT)
     sum_sin = cv2.filter2D(sin2, -1, kernel, borderType=cv2.BORDER_CONSTANT)
 
-    consistency = np.zeros_like(tex_norm, dtype=np.float32)
+    consistency = np.zeros_like(texture_binary, dtype=np.float32)
     ok = cnt > 1e-6
-    mean_cos = np.zeros_like(tex_norm, dtype=np.float32)
-    mean_sin = np.zeros_like(tex_norm, dtype=np.float32)
+    mean_cos = np.zeros_like(texture_binary, dtype=np.float32)
+    mean_sin = np.zeros_like(texture_binary, dtype=np.float32)
     mean_cos[ok] = sum_cos[ok] / cnt[ok]
     mean_sin[ok] = sum_sin[ok] / cnt[ok]
     consistency[ok] = np.sqrt(mean_cos[ok] ** 2 + mean_sin[ok] ** 2)

@@ -52,7 +52,6 @@ PARAM_DEFAULTS = {
     "target_class": 1,
     "radius_mode": "动态",
     "fixed_radius": 40,
-    "texture_threshold": 0.40,
     "density_weight": 0.70,
     "consistency_weight": 0.30,
     "heat_alpha": 0.55,
@@ -106,7 +105,6 @@ def normalize_params_dict(raw_data: dict) -> dict:
     data["box_mode"] = "固定" if data.get("box_mode") == "固定" else "动态"
     data["presence_mode"] = "quantile" if data.get("presence_mode") == "quantile" else "threshold"
     data["fixed_radius"] = _clamp_int(int(data.get("fixed_radius", 40)), 8, 120)
-    data["texture_threshold"] = _clamp_float(float(data.get("texture_threshold", 0.40)), 0.05, 0.95)
     data["density_weight"] = _clamp_float(float(data.get("density_weight", 0.70)), 0.0, 1.0)
     data["consistency_weight"] = _clamp_float(float(data.get("consistency_weight", 0.30)), 0.0, 1.0)
     data["heat_alpha"] = _clamp_float(float(data.get("heat_alpha", 0.55)), 0.1, 0.9)
@@ -129,7 +127,6 @@ def apply_params_to_session(params: dict) -> None:
     st.session_state["p_target_class"] = int(params["target_class"])
     st.session_state["p_radius_mode"] = str(params["radius_mode"])
     st.session_state["p_fixed_radius"] = int(params["fixed_radius"])
-    st.session_state["p_texture_threshold"] = float(params["texture_threshold"])
     st.session_state["p_density_weight"] = float(params["density_weight"])
     st.session_state["p_consistency_weight"] = float(params["consistency_weight"])
     st.session_state["p_heat_alpha"] = float(params["heat_alpha"])
@@ -179,7 +176,6 @@ def build_current_params_snapshot(
     target_class: int,
     radius_mode: str,
     fixed_radius: int | None,
-    texture_threshold: float,
     density_weight: float,
     consistency_weight: float,
     heat_alpha: float,
@@ -198,7 +194,6 @@ def build_current_params_snapshot(
         "target_class": int(target_class),
         "radius_mode": str(radius_mode),
         "fixed_radius": int(fixed_radius) if fixed_radius is not None else int(st.session_state.get("p_fixed_radius", 40)),
-        "texture_threshold": float(texture_threshold),
         "density_weight": float(density_weight),
         "consistency_weight": float(consistency_weight),
         "heat_alpha": float(heat_alpha),
@@ -411,7 +406,6 @@ def compute_score_map_custom(
     texture_path: Path,
     target_class: int,
     fixed_radius: int | None,
-    texture_threshold: float,
     density_weight: float,
     consistency_weight: float,
     device: str,
@@ -436,14 +430,13 @@ def compute_score_map_custom(
     radius = dynamic_radius_from_size(h, w) if fixed_radius is None else int(fixed_radius)
     kernel = build_disk_kernel(radius)
 
-    tex_norm = tex.astype(np.float32) / 255.0
-    texture_binary = ((tex_norm > texture_threshold) & (region_mask > 0)).astype(np.float32)
+    texture_binary = ((tex > 0) & (region_mask > 0)).astype(np.float32)
     region_mask_f = region_mask.astype(np.float32)
 
     valid_count = cv2.filter2D(region_mask_f, -1, kernel, borderType=cv2.BORDER_CONSTANT)
     texture_count = cv2.filter2D(texture_binary, -1, kernel, borderType=cv2.BORDER_CONSTANT)
 
-    density = np.zeros_like(tex_norm, dtype=np.float32)
+    density = np.zeros_like(texture_binary, dtype=np.float32)
     valid_local = valid_count > 1e-6
     density[valid_local] = texture_count[valid_local] / valid_count[valid_local]
 
@@ -458,10 +451,10 @@ def compute_score_map_custom(
     sum_cos = cv2.filter2D(cos2, -1, kernel, borderType=cv2.BORDER_CONSTANT)
     sum_sin = cv2.filter2D(sin2, -1, kernel, borderType=cv2.BORDER_CONSTANT)
 
-    consistency = np.zeros_like(tex_norm, dtype=np.float32)
+    consistency = np.zeros_like(texture_binary, dtype=np.float32)
     ok = cnt > 1e-6
-    mean_cos = np.zeros_like(tex_norm, dtype=np.float32)
-    mean_sin = np.zeros_like(tex_norm, dtype=np.float32)
+    mean_cos = np.zeros_like(texture_binary, dtype=np.float32)
+    mean_sin = np.zeros_like(texture_binary, dtype=np.float32)
     mean_cos[ok] = sum_cos[ok] / cnt[ok]
     mean_sin[ok] = sum_sin[ok] / cnt[ok]
     consistency[ok] = np.sqrt(mean_cos[ok] ** 2 + mean_sin[ok] ** 2)
@@ -667,7 +660,6 @@ def run_heatmap_and_worst(
     model_path: Path,
     target_class: int,
     fixed_radius: int | None,
-    texture_threshold: float,
     density_weight: float,
     consistency_weight: float,
     heat_alpha: float,
@@ -695,7 +687,6 @@ def run_heatmap_and_worst(
         texture_path=texture_path,
         target_class=target_class,
         fixed_radius=fixed_radius,
-        texture_threshold=texture_threshold,
         density_weight=density_weight,
         consistency_weight=consistency_weight,
         device=device,
@@ -1094,15 +1085,6 @@ def app():
             help="局部统计窗口半径（像素）。越大越平滑，越小越敏感。",
         )
 
-    texture_threshold = st.sidebar.number_input(
-        "纹理像素阈值",
-        min_value=0.05,
-        max_value=0.95,
-        step=0.01,
-        format="%.2f",
-        key="p_texture_threshold",
-        help="将纹理图像素判定为纹理点的阈值。阈值越高，识别到的纹理点越少。",
-    )
     density_weight = st.sidebar.number_input(
         "密度权重",
         min_value=0.0,
@@ -1238,7 +1220,7 @@ def app():
         st.markdown(
             "- 目标类别：决定在哪个分割区域上计算严重度。\n"
             "- Radius：局部统计邻域大小，影响热图平滑程度。\n"
-            "- 纹理像素阈值：决定哪些像素计入纹理密度。\n"
+            "- 纹理像素：直接使用Canny与形态学处理后的原始二值纹理线。\n"
             "- 密度/一致性权重：共同决定严重度分数。\n"
             "- Presence模式：threshold按固定分数切，quantile按分位切。\n"
             "- Box参数：控制最严重框的大小、数量和有效区域约束。\n"
@@ -1274,7 +1256,6 @@ def app():
             target_class=target_class,
             radius_mode=radius_mode,
             fixed_radius=fixed_radius,
-            texture_threshold=texture_threshold,
             density_weight=density_weight,
             consistency_weight=consistency_weight,
             heat_alpha=heat_alpha,
@@ -1302,7 +1283,6 @@ def app():
                 model_path=model_path,
                 target_class=target_class,
                 fixed_radius=fixed_radius,
-                texture_threshold=texture_threshold,
                 density_weight=density_weight,
                 consistency_weight=consistency_weight,
                 heat_alpha=heat_alpha,
@@ -1347,7 +1327,6 @@ def app():
             target_class=target_class,
             radius_mode=radius_mode,
             fixed_radius=fixed_radius,
-            texture_threshold=texture_threshold,
             density_weight=density_weight,
             consistency_weight=consistency_weight,
             heat_alpha=heat_alpha,
@@ -1374,7 +1353,6 @@ def app():
                 model_path=model_path,
                 target_class=target_class,
                 fixed_radius=fixed_radius,
-                texture_threshold=texture_threshold,
                 density_weight=density_weight,
                 consistency_weight=consistency_weight,
                 heat_alpha=heat_alpha,
@@ -1416,7 +1394,6 @@ def app():
             target_class=target_class,
             radius_mode=radius_mode,
             fixed_radius=fixed_radius,
-            texture_threshold=texture_threshold,
             density_weight=density_weight,
             consistency_weight=consistency_weight,
             heat_alpha=heat_alpha,
@@ -1458,7 +1435,6 @@ def app():
                         model_path=model_path,
                         target_class=target_class,
                         fixed_radius=fixed_radius,
-                        texture_threshold=texture_threshold,
                         density_weight=density_weight,
                         consistency_weight=consistency_weight,
                         heat_alpha=heat_alpha,

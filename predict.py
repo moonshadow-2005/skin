@@ -258,15 +258,10 @@ def plot_radial_sectors(img, orientations, mask, output_dir, step=20):
     sector_densities = []  # 存储每个扇区的密集程度
     sector_info = []  # 存储每个扇区的详细信息
     
-    # 修改：直接基于像素值识别纹理像素
-    # 将图像归一化到0-1范围
-    img_normalized = img.astype(np.float32) / 255.0
-    # 像素值大于0.4的认为是纹理像素
-    texture_threshold = 0.4
-    texture_mask = (img_normalized > texture_threshold) & (mask > 0)
-    
-    print(f"纹理识别方法: 像素值阈值法")
-    print(f"纹理像素阈值: {texture_threshold} (归一化值)")
+    # 输入是原始0/255二值纹理线，非零像素直接视为纹理像素。
+    texture_mask = (img > 0) & (mask > 0)
+
+    print("纹理识别方法: 原始二值纹理线非零像素")
     print(f"总纹理像素数: {np.sum(texture_mask)}")
     print(f"总有效像素数: {np.sum(mask > 0)}")
     print(f"全图纹理密度比例: {np.sum(texture_mask) / np.sum(mask > 0):.3f}")
@@ -358,7 +353,7 @@ def plot_radial_sectors(img, orientations, mask, output_dir, step=20):
     max_density_info = sector_info[max_density_index]
     
     print(f"\n=== 扇区纹理密集程度分析 ===")
-    print(f"纹理识别方法: 像素值阈值法 (阈值={texture_threshold})")
+    print("纹理识别方法: 原始二值纹理线非零像素")
     print("-" * 80)
     for info in sector_info:
         print(f"扇区{info['index']} ({info['angle_range']}): "
@@ -531,8 +526,7 @@ def generate_sector_analysis_image(img, orientations, sector_mask, sector_info, 
 • 纹理密度比例: 70%
 • 方向一致性: 30%
 
-纹理识别方法: 像素值阈值法
-纹理阈值: 0.4 (归一化值)
+纹理识别方法: 原始二值纹理线非零像素
     """
     
     plt.text(0.05, 0.5, stats_text, fontsize=9, 

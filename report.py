@@ -208,9 +208,8 @@ def generate_summary_report(sector_info, num):
         # 2. 分析方法
         f.write("## 2. 分析方法\n\n")
         f.write("### 2.1 纹理像素识别\n")
-        f.write("- **方法**: 像素值阈值法\n")
-        f.write("- **阈值**: 0.4 (归一化像素值)\n")
-        f.write("- **原理**: 像素值 > 0.4 的像素认为是纹理像素\n\n")
+        f.write("- **方法**: 原始二值纹理线非零像素判定\n")
+        f.write("- **原理**: Canny与形态学处理后的非零像素直接作为纹理像素\n\n")
         
         f.write("### 2.2 空间分区策略\n")
         f.write("- **分区方法**: 径向扇形分区\n")
@@ -400,4 +399,4 @@ if __name__ == "__main__":
         sys.exit(1)
     except Exception as e:
         print(f"报告生成过程中发生错误：{e}")
-        sys.exit(1) 
+        sys.exit(1)
