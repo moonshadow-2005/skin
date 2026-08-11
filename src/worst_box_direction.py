@@ -298,25 +298,6 @@ def extract_connected_high_area(
     return out, start_point, start_val
 
 
-def mean_orientation_degrees(orientations: np.ndarray, mask: np.ndarray, box):
-    x1, y1, x2, y2 = box["x1"], box["y1"], box["x2"], box["y2"]
-    patch_o = orientations[y1:y2, x1:x2]
-    patch_m = mask[y1:y2, x1:x2] > 0
-
-    vals = patch_o[patch_m]
-    vals = vals[~np.isnan(vals)]
-    if vals.size == 0:
-        return None
-
-    doubled = 2.0 * vals
-    mc = float(np.mean(np.cos(doubled)))
-    ms = float(np.mean(np.sin(doubled)))
-    mean_doubled = float(np.arctan2(ms, mc))
-    mean_angle = (mean_doubled / 2.0) % np.pi
-    deg = np.degrees(mean_angle)
-    return float(deg)
-
-
 def mean_orientation_degrees_for_mask(orientations: np.ndarray, mask: np.ndarray) -> float | None:
     vals = orientations[mask > 0]
     vals = vals[~np.isnan(vals)]
@@ -415,7 +396,6 @@ def draw_outputs(
     out_dir: Path,
     box_size: int,
     boxes: list[dict],
-    mean_degs: list[float | None],
     pred: np.ndarray,
     region_mask: np.ndarray | None = None,
     area_masks: list[np.ndarray] | None = None,
@@ -507,7 +487,6 @@ def draw_outputs(
             cv2.LINE_AA,
         )
 
-    vis_dir = vis_box.copy()
     vis_area = img.copy()
     draw_boundary_like_segmentation(vis_area, class1)
     vis_area_direction = vis_area.copy()
@@ -604,59 +583,8 @@ def draw_outputs(
             sx, sy = seed_points[i]
             for canvas in (vis_area, vis_area_direction, vis_area_local_direction):
                 cv2.circle(canvas, (int(sx), int(sy)), 4, (255, 255, 255), -1)
-    constrained_degs: list[float | None] = []
-    for i, box in enumerate(boxes):
-        mean_deg = mean_degs[i] if i < len(mean_degs) else None
-        if mean_deg is None:
-            constrained_degs.append(None)
-            continue
-        color = box_colors[i % len(box_colors)]
-        cx, cy = box["xc"], box["yc"]
-
-        directed_deg = float(mean_deg)
-        if anchor is not None:
-            ax, ay = anchor
-            vec_x = float(cx - ax)
-            vec_y = float(cy - ay)
-            if abs(vec_x) > 1e-6 or abs(vec_y) > 1e-6:
-                directed_deg = orient_angle_towards_vector(mean_deg, vec_x, vec_y)
-
-        constrained_degs.append(directed_deg)
-
-        theta = np.radians(directed_deg)
-        length = 35
-        dx = int(round(np.cos(theta) * length))
-        dy = int(round(np.sin(theta) * length))
-        cv2.arrowedLine(vis_dir, (cx, cy), (cx + dx, cy + dy), color, 3, tipLength=0.2)
-        y_text = min(vis_dir.shape[0] - 10 - i * 25, box["y2"] + 25)
-        cv2.putText(
-            vis_dir,
-            f"Box{i+1} direction(constrained): {directed_deg:.1f} deg",
-            (max(5, box["x1"]), max(20, y_text)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            color,
-            2,
-            cv2.LINE_AA,
-        )
-
-    if anchor is not None:
-        ax, ay = anchor
-        cv2.circle(vis_dir, (ax, ay), 4, (255, 255, 255), -1)
-        cv2.putText(
-            vis_dir,
-            "A",
-            (ax + 6, max(15, ay - 6)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (255, 255, 255),
-            2,
-            cv2.LINE_AA,
-        )
-
     out_dir.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out_dir / f"{image_path.stem}_worst{box_size}_box.png"), vis_box)
-    cv2.imwrite(str(out_dir / f"{image_path.stem}_worst{box_size}_direction.png"), vis_dir)
     cv2.imwrite(str(out_dir / f"{image_path.stem}_worst{box_size}_area.png"), vis_area)
     cv2.imwrite(str(out_dir / f"{image_path.stem}_worst{box_size}_area_direction.png"), vis_area_direction)
     cv2.imwrite(
@@ -688,16 +616,6 @@ def draw_outputs(
             f.write(f"box{i}_objective={box['objective']:.6f}\n")
             f.write(f"box{i}_overlap_count={box['overlap_count']:.1f}\n")
             f.write(f"box{i}_overlap_ratio={box['overlap_ratio']:.6f}\n")
-            mean_deg = mean_degs[i - 1] if i - 1 < len(mean_degs) else None
-            if mean_deg is None:
-                f.write(f"box{i}_mean_direction_deg=nan\n")
-            else:
-                f.write(f"box{i}_mean_direction_deg={mean_deg:.6f}\n")
-            constrained_deg = constrained_degs[i - 1] if i - 1 < len(constrained_degs) else None
-            if constrained_deg is None:
-                f.write(f"box{i}_constrained_direction_deg=nan\n")
-            else:
-                f.write(f"box{i}_constrained_direction_deg={constrained_deg:.6f}\n")
             if i - 1 < len(area_masks) and area_masks[i - 1] is not None:
                 f.write(f"box{i}_connected_area_px={int(np.count_nonzero(area_masks[i - 1]))}\n")
             if i - 1 < len(area_direction_degs) and area_direction_degs[i - 1] is not None:
@@ -756,7 +674,6 @@ def main():
         used_box_size = int(args.box_size)
 
     boxes = []
-    means = []
     forbidden = []
     area_masks: list[np.ndarray] = []
     seed_points: list[tuple[int, int] | None] = []
@@ -778,7 +695,6 @@ def main():
         except RuntimeError:
             break
         boxes.append(box)
-        means.append(mean_orientation_degrees(orientations, mask, box))
         forbidden.append(box)
         area_mask, seed_pt, _ = extract_connected_high_area(score, mask, box, area_threshold)
         area_masks.append(area_mask)
@@ -793,7 +709,6 @@ def main():
         out_dir,
         used_box_size,
         boxes,
-        means,
         pred,
         region_mask=mask,
         area_masks=area_masks,
@@ -816,11 +731,6 @@ def main():
         print(f"box{i}_mean_severity={box['mean_severity']:.4f}")
         print(f"box{i}_objective={box['objective']:.4f}")
         print(f"box{i}_overlap_ratio={box['overlap_ratio']:.4f}")
-        mean_deg = means[i - 1]
-        if mean_deg is None:
-            print(f"box{i}_mean_direction_deg=nan")
-        else:
-            print(f"box{i}_mean_direction_deg={mean_deg:.2f}")
 
 
 if __name__ == "__main__":

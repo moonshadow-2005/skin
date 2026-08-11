@@ -34,10 +34,8 @@ from src.local_score_heatmap import (
 )
 from src.run_one_full_pipeline import overlay_images_unicode
 from src.worst_box_direction import (
-    draw_outputs,
     extract_connected_high_area,
     find_worst_box,
-    mean_orientation_degrees,
     scaled_box_size_from_shape,
 )
 import src.worst_box_direction as worst_box_direction_module
@@ -46,11 +44,12 @@ import src.worst_box_direction as worst_box_direction_module
 PROJECT_ROOT = Path(__file__).resolve().parent
 INPUT_DIR = PROJECT_ROOT / "web_demo_inputs"
 OUTPUT_DIR = PROJECT_ROOT / "web_demo_output"
+DISPLAY_SETTINGS_PATH = PROJECT_ROOT / "web_demo_display_settings.json"
 
 PARAM_DEFAULTS = {
     "model_rel": "best_trans_unet_model_20250614_122913.pth",
     "target_class": 1,
-    "radius_mode": "动态",
+    "radius_mode": "Dynamic",
     "fixed_radius": 40,
     "density_weight": 0.70,
     "consistency_weight": 0.30,
@@ -58,13 +57,225 @@ PARAM_DEFAULTS = {
     "n_bins": 2,
     "presence_mode": "quantile",
     "presence_cuts": [80.0],
-    "box_mode": "固定",
+    "box_mode": "Fixed",
     "box_size": 80,
     "num_boxes": 2,
     "min_overlap": 0.30,
     "area_percentile": 80.0,
     "local_direction_radius": 40,
 }
+
+DISPLAY_SETTINGS_DEFAULTS = {
+    "parameters": {
+        "model_file": True,
+        "target_class": True,
+        "radius_mode": True,
+        "heatmap_radius": True,
+        "density_weight": True,
+        "consistency_weight": True,
+        "severity_overlay_opacity": True,
+        "presence_levels": True,
+        "presence_split_mode": True,
+        "presence_cutoffs": True,
+        "box_size_mode": True,
+        "box_size": True,
+        "number_of_boxes": True,
+        "minimum_mask_coverage": True,
+        "worst_area_percentile": True,
+        "local_direction_radius": True,
+        "parameter_guide": True,
+    },
+    "images": {
+        "original_image": True,
+        "segmentation_overlay": True,
+        "segmentation_filled": True,
+        "texture_lines": True,
+        "texture_comparison": True,
+        "pixel_texture_axis_map": True,
+        "texture_axis_overlay": True,
+        "severity_map": True,
+        "presence_map": True,
+        "severity_map_overlay": True,
+        "presence_level_overlay": True,
+        "worst_area_search_boxes": True,
+        "presence_map_overlay": True,
+        "regional_mean_direction_map": True,
+        "local_direction_map": True,
+        "worst_area_parameters": True,
+    },
+}
+
+PARAMETER_SETTING_LABELS = {
+    "model_file": "Model File",
+    "target_class": "Target Class",
+    "radius_mode": "Radius Mode",
+    "heatmap_radius": "Heatmap Radius",
+    "density_weight": "Local Texture Density Weight",
+    "consistency_weight": "Local Orientation Consistency Weight",
+    "severity_overlay_opacity": "Severity Map Overlay Opacity",
+    "presence_levels": "Number of Presence Levels",
+    "presence_split_mode": "Presence Split Mode",
+    "presence_cutoffs": "Presence Thresholds / Quantiles",
+    "box_size_mode": "Box Size Mode",
+    "box_size": "Box Size",
+    "number_of_boxes": "Number of Boxes",
+    "minimum_mask_coverage": "Minimum Mask Coverage",
+    "worst_area_percentile": "Worst Area Severity Percentile (q)",
+    "local_direction_radius": "Local Direction Radius",
+    "parameter_guide": "Parameter Guide",
+}
+
+IMAGE_SETTING_LABELS = {
+    "original_image": "Original Image (Output Copy)",
+    "segmentation_overlay": "Three-Class Segmentation Overlay",
+    "segmentation_filled": "Three-Class Segmentation",
+    "texture_lines": "Texture Lines",
+    "texture_comparison": "Texture Line Overlay",
+    "pixel_texture_axis_map": "Pixel-Level Texture-Axis Map",
+    "texture_axis_overlay": "Texture-Axis Overlay",
+    "severity_map": "Severity Map",
+    "presence_map": "Presence Level",
+    "severity_map_overlay": "Severity Map Overlay",
+    "presence_level_overlay": "Presence Level Overlay",
+    "worst_area_search_boxes": "Worst Area Search Boxes",
+    "presence_map_overlay": "Presence Map Overlay",
+    "regional_mean_direction_map": "Regional Mean Direction Map",
+    "local_direction_map": "Local Direction Map",
+    "worst_area_parameters": "Worst Area Parameters",
+}
+
+PARAMETER_SETTING_GROUPS = (
+    ("Input and Model", ("model_file", "target_class")),
+    (
+        "Severity Analysis",
+        ("radius_mode", "heatmap_radius", "density_weight", "consistency_weight", "severity_overlay_opacity"),
+    ),
+    (
+        "Presence Parameters",
+        ("presence_levels", "presence_split_mode", "presence_cutoffs", "worst_area_percentile"),
+    ),
+    (
+        "Worst Area Detection",
+        ("box_size_mode", "box_size", "number_of_boxes", "minimum_mask_coverage"),
+    ),
+    ("Direction Analysis", ("local_direction_radius",)),
+    ("Help", ("parameter_guide",)),
+)
+
+IMAGE_SETTING_GROUPS = (
+    ("Input", ("original_image",)),
+    ("Three-Class Segmentation", ("segmentation_overlay", "segmentation_filled")),
+    ("Texture Extraction", ("texture_lines", "texture_comparison")),
+    ("Texture-Axis Estimation", ("pixel_texture_axis_map", "texture_axis_overlay")),
+    ("Severity Analysis", ("severity_map", "severity_map_overlay")),
+    ("Presence Level", ("presence_map", "presence_level_overlay")),
+    ("Worst Area Detection", ("worst_area_search_boxes", "presence_map_overlay", "worst_area_parameters")),
+    ("Direction Analysis", ("regional_mean_direction_map", "local_direction_map")),
+)
+
+
+def normalize_display_settings(raw_data: dict | None) -> dict:
+    normalized = {
+        group: dict(defaults)
+        for group, defaults in DISPLAY_SETTINGS_DEFAULTS.items()
+    }
+    if not isinstance(raw_data, dict):
+        return normalized
+
+    for group, defaults in DISPLAY_SETTINGS_DEFAULTS.items():
+        raw_group = raw_data.get(group)
+        if not isinstance(raw_group, dict):
+            continue
+        for key in defaults:
+            value = raw_group.get(key)
+            if isinstance(value, bool):
+                normalized[group][key] = value
+    return normalized
+
+
+def load_display_settings() -> dict:
+    if not DISPLAY_SETTINGS_PATH.exists():
+        return normalize_display_settings(None)
+    try:
+        raw = json.loads(DISPLAY_SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return normalize_display_settings(None)
+    return normalize_display_settings(raw)
+
+
+def save_display_settings(settings: dict) -> None:
+    normalized = normalize_display_settings(settings)
+    temporary_path = DISPLAY_SETTINGS_PATH.with_suffix(".json.tmp")
+    temporary_path.write_text(
+        json.dumps(normalized, ensure_ascii=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary_path.replace(DISPLAY_SETTINGS_PATH)
+
+
+def display_enabled(settings: dict, group: str, key: str) -> bool:
+    return bool(settings.get(group, {}).get(key, DISPLAY_SETTINGS_DEFAULTS[group][key]))
+
+
+def render_display_settings_page(settings: dict) -> None:
+    st.title("Display Settings")
+    st.caption(
+        "Choose which parameter controls and result images are visible on the Analysis page. "
+        "Saved settings persist across Demo restarts."
+    )
+
+    with st.form("display_settings_form"):
+        parameter_tab, image_tab = st.tabs(["Parameter Controls", "Result Images"])
+        selected = {"parameters": {}, "images": {}}
+
+        with parameter_tab:
+            st.markdown("Select the controls to show in the Analysis sidebar.")
+            for group_title, keys in PARAMETER_SETTING_GROUPS:
+                st.markdown(f"**{group_title}**")
+                columns = st.columns(2)
+                for index, key in enumerate(keys):
+                    with columns[index % 2]:
+                        selected["parameters"][key] = st.checkbox(
+                            PARAMETER_SETTING_LABELS[key],
+                            value=display_enabled(settings, "parameters", key),
+                            key=f"setting_parameter_{key}",
+                        )
+
+        with image_tab:
+            st.markdown("Select the intermediate results and output images to show.")
+            for group_title, keys in IMAGE_SETTING_GROUPS:
+                st.markdown(f"**{group_title}**")
+                columns = st.columns(2)
+                for index, key in enumerate(keys):
+                    with columns[index % 2]:
+                        selected["images"][key] = st.checkbox(
+                            IMAGE_SETTING_LABELS[key],
+                            value=display_enabled(settings, "images", key),
+                            key=f"setting_image_{key}",
+                        )
+
+        save_clicked = st.form_submit_button("Save Display Settings", type="primary")
+
+    reset_clicked = st.button("Reset All to Visible")
+    if save_clicked:
+        try:
+            save_display_settings(selected)
+        except OSError as exc:
+            st.error(f"Could not save display settings: {exc}")
+        else:
+            st.success(f"Display settings saved to {DISPLAY_SETTINGS_PATH.name}.")
+            st.rerun()
+    if reset_clicked:
+        try:
+            save_display_settings(DISPLAY_SETTINGS_DEFAULTS)
+        except OSError as exc:
+            st.error(f"Could not reset display settings: {exc}")
+        else:
+            for key in list(st.session_state):
+                if key.startswith("setting_parameter_") or key.startswith("setting_image_"):
+                    del st.session_state[key]
+            st.success("All parameter controls and result images are visible again.")
+            st.rerun()
 
 
 def _clamp_int(v: int, lo: int, hi: int) -> int:
@@ -101,8 +312,9 @@ def normalize_params_dict(raw_data: dict) -> dict:
         data.update(raw_data)
 
     data["target_class"] = 1 if int(data.get("target_class", 1)) != 2 else 2
-    data["radius_mode"] = "固定" if data.get("radius_mode") == "固定" else "动态"
-    data["box_mode"] = "固定" if data.get("box_mode") == "固定" else "动态"
+    legacy_fixed = "\u56fa\u5b9a"
+    data["radius_mode"] = "Fixed" if data.get("radius_mode") in ("Fixed", legacy_fixed) else "Dynamic"
+    data["box_mode"] = "Fixed" if data.get("box_mode") in ("Fixed", legacy_fixed) else "Dynamic"
     data["presence_mode"] = "quantile" if data.get("presence_mode") == "quantile" else "threshold"
     data["fixed_radius"] = _clamp_int(int(data.get("fixed_radius", 40)), 8, 120)
     data["density_weight"] = _clamp_float(float(data.get("density_weight", 0.70)), 0.0, 1.0)
@@ -161,13 +373,64 @@ def load_params_from_output_dir(out_dir: Path) -> dict | None:
         return None
 
 
-def init_params_state_once() -> None:
-    if st.session_state.get("_params_initialized"):
-        return
-
+def parameter_session_defaults() -> dict:
     params = normalize_params_dict(PARAM_DEFAULTS)
-    apply_params_to_session(params)
+    defaults = {
+        "p_model_rel": str(params["model_rel"]),
+        "p_target_class": int(params["target_class"]),
+        "p_radius_mode": str(params["radius_mode"]),
+        "p_fixed_radius": int(params["fixed_radius"]),
+        "p_density_weight": float(params["density_weight"]),
+        "p_consistency_weight": float(params["consistency_weight"]),
+        "p_heat_alpha": float(params["heat_alpha"]),
+        "p_n_bins": int(params["n_bins"]),
+        "p_presence_mode": str(params["presence_mode"]),
+        "p_box_mode": str(params["box_mode"]),
+        "p_box_size": int(params["box_size"]),
+        "p_num_boxes": int(params["num_boxes"]),
+        "p_min_overlap": float(params["min_overlap"]),
+        "p_area_percentile": float(params["area_percentile"]),
+        "p_local_direction_radius": int(params["local_direction_radius"]),
+    }
+    cuts = params["presence_cuts"]
+    for i in range(5):
+        defaults[f"p_presence_cut_{i}"] = float(cuts[i]) if i < len(cuts) else 0.0
+    return defaults
 
+
+def cache_parameter_session_state() -> None:
+    cache = dict(st.session_state.get("_parameter_state_cache", {}))
+    for key in parameter_session_defaults():
+        if key in st.session_state:
+            cache[key] = st.session_state[key]
+    st.session_state["_parameter_state_cache"] = cache
+
+
+def restore_cached_parameter_session_state() -> None:
+    cached_values = st.session_state.get("_parameter_state_cache", {})
+    if not isinstance(cached_values, dict):
+        return
+    for key in parameter_session_defaults():
+        if key in cached_values:
+            st.session_state[key] = cached_values[key]
+
+
+def init_params_state_once() -> None:
+    cached_values = st.session_state.get("_parameter_state_cache", {})
+    if not isinstance(cached_values, dict):
+        cached_values = {}
+    for key, value in parameter_session_defaults().items():
+        if key not in st.session_state:
+            st.session_state[key] = cached_values.get(key, value)
+
+    legacy_fixed = "\u56fa\u5b9a"
+    st.session_state["p_radius_mode"] = (
+        "Fixed" if st.session_state.get("p_radius_mode") in ("Fixed", legacy_fixed) else "Dynamic"
+    )
+    st.session_state["p_box_mode"] = (
+        "Fixed" if st.session_state.get("p_box_mode") in ("Fixed", legacy_fixed) else "Dynamic"
+    )
+    cache_parameter_session_state()
     st.session_state["_params_initialized"] = True
 
 
@@ -293,10 +556,10 @@ def copy_original_to_output(image_path: Path, out_dir: Path, original_name: str 
     dst = out_dir / f"00_original__{safe_name}.png"
     img = imread_unicode(image_path, cv2.IMREAD_UNCHANGED)
     if img is None:
-        raise FileNotFoundError(f"无法读取原图用于PNG转换: {image_path}")
+        raise FileNotFoundError(f"Cannot read the original image for PNG conversion: {image_path}")
     ok, encoded = cv2.imencode(".png", img)
     if not ok:
-        raise RuntimeError(f"无法将原图编码为PNG: {image_path}")
+        raise RuntimeError(f"Cannot encode the original image as PNG: {image_path}")
     encoded.tofile(str(dst))
     return dst
 
@@ -326,7 +589,7 @@ def resolve_predict_output(case_id: str, prefix: str) -> Path:
     if wildcard:
         return wildcard[0]
 
-    raise FileNotFoundError(f"未找到预测输出: {prefix}{case_id}.png (或兼容后缀 {suffix})")
+    raise FileNotFoundError(f"Prediction output not found: {prefix}{case_id}.png (or compatible suffix {suffix})")
 
 
 def make_segmentation_visuals(
@@ -418,11 +681,11 @@ def compute_score_map_custom(
         region_mask = raw_region_mask
 
     if np.sum(region_mask) == 0:
-        raise RuntimeError("目标区域为空，请切换 target_class 或检查图片质量。")
+        raise RuntimeError("The effective intertidal zone is empty. Change Target Class or check the image quality.")
 
     tex = imread_unicode(texture_path, cv2.IMREAD_GRAYSCALE)
     if tex is None:
-        raise FileNotFoundError(f"纹理图不存在: {texture_path}")
+        raise FileNotFoundError(f"Texture image not found: {texture_path}")
     if tex.shape != pred.shape:
         tex = cv2.resize(tex, (pred.shape[1], pred.shape[0]), interpolation=cv2.INTER_NEAREST)
 
@@ -525,7 +788,7 @@ def build_presence_map_custom(
     colors_bgr: List[Tuple[int, int, int]],
 ) -> np.ndarray:
     if len(colors_bgr) != len(thresholds) + 1:
-        raise ValueError("颜色数量必须等于阈值数量+1")
+        raise ValueError("The number of colors must equal the number of thresholds plus one.")
 
     out = np.zeros((score_norm.shape[0], score_norm.shape[1], 3), dtype=np.uint8)
     inside = region_mask > 0
@@ -679,7 +942,7 @@ def run_heatmap_and_worst(
 
     texture_path = PROJECT_ROOT / "skin_output" / f"only_texture_line_{case_id}.png"
     if not texture_path.exists():
-        raise FileNotFoundError("请先生成全流程中间结果（纹理图尚未生成）。")
+        raise FileNotFoundError("Run the full pipeline first; the texture image has not been generated.")
 
     result = compute_score_map_custom(
         image_path=image_path,
@@ -694,7 +957,7 @@ def run_heatmap_and_worst(
 
     original = imread_unicode(image_path, cv2.IMREAD_COLOR)
     if original is None:
-        raise FileNotFoundError(f"无法读取原图: {image_path}")
+        raise FileNotFoundError(f"Cannot read the original image: {image_path}")
     if original.shape[:2] != result["score_norm"].shape:
         original = cv2.resize(original, (result["score_norm"].shape[1], result["score_norm"].shape[0]))
 
@@ -733,7 +996,6 @@ def run_heatmap_and_worst(
         used_box_size = int(box_size)
 
     boxes = []
-    means = []
     forbidden = []
     area_masks = []
     seed_points = []
@@ -754,7 +1016,6 @@ def run_heatmap_and_worst(
         except RuntimeError:
             break
         boxes.append(box)
-        means.append(mean_orientation_degrees(result["orientations"], result["region_mask"], box))
         forbidden.append(box)
         area_mask, seed_pt, _ = extract_connected_high_area(
             result["score_norm"],
@@ -767,7 +1028,7 @@ def run_heatmap_and_worst(
         forbidden_area[area_mask > 0] = 1
 
     if len(boxes) == 0:
-        raise RuntimeError("在联通区域约束下未找到可用最严重框，请调整参数后重试。")
+        raise RuntimeError("No worst box satisfies the connected-area constraint. Adjust the parameters and retry.")
 
     # Remove stale worst-box artifacts so UI always reflects the current run.
     for stale in out_dir.glob(f"{image_path.stem}_worst*_box.png"):
@@ -785,7 +1046,6 @@ def run_heatmap_and_worst(
         out_dir=out_dir,
         box_size=used_box_size,
         boxes=boxes,
-        mean_degs=means,
         pred=result["pred"],
         region_mask=result["region_mask"],
         area_masks=area_masks,
@@ -828,7 +1088,7 @@ def run_full_pipeline(
     pred = predict_mask(str(image_path), str(model_path), device)
     original = imread_unicode(image_path, cv2.IMREAD_COLOR)
     if original is None:
-        raise FileNotFoundError(f"无法读取原图: {image_path}")
+        raise FileNotFoundError(f"Cannot read the original image: {image_path}")
     region_mask_for_boundary = build_effective_texture_region_mask((pred == 1).astype(np.uint8))
     filled, boundary, seg_overlay = make_segmentation_visuals(
         original,
@@ -842,12 +1102,11 @@ def run_full_pipeline(
     analyze_skin_texture(str(image_path), model_path=str(model_path), device=device)
     texture_path = PROJECT_ROOT / "skin_output" / f"only_texture_line_{case_id}.png"
     if not texture_path.exists():
-        raise FileNotFoundError(f"纹理图未生成: {texture_path}")
+        raise FileNotFoundError(f"Texture image was not generated: {texture_path}")
 
-    analyze_texture_orientation(str(texture_path))
+    analyze_texture_orientation(str(texture_path), include_sector_analysis=False)
     orientation_local = resolve_predict_output(case_id, "orientation_local_texture_line_")
     orientation_full = resolve_predict_output(case_id, "orientation_texture_line_")
-    sector_vis = resolve_predict_output(case_id, "spatial_sector_directions_")
 
     texture_direction_overlay = out_dir / "texture_direction_overlay.png"
     overlay_images_unicode(str(image_path), str(orientation_local), str(texture_direction_overlay))
@@ -856,10 +1115,9 @@ def run_full_pipeline(
         "out_dir": out_dir,
         "original_copy": original_copy,
         "texture_only": texture_path,
-        "texture_compare": PROJECT_ROOT / "skin_output" / f"texture_line_{case_id}.png",
+        "texture_compare": PROJECT_ROOT / "skin_output" / f"texture_overlay_{case_id}.png",
         "orientation_local": orientation_local,
         "orientation_full": orientation_full,
-        "sector_vis": sector_vis,
         "texture_direction_overlay": texture_direction_overlay,
     }
 
@@ -868,7 +1126,7 @@ def show_image_if_exists(path: Path, caption: str):
     if path.exists():
         st.image(str(path), caption=caption, use_container_width=True)
     else:
-        st.warning(f"未找到: {path.name}")
+        st.warning(f"Not found: {path.name}")
 
 
 def show_image_with_explain(path: Path, title: str, explain: str):
@@ -877,80 +1135,573 @@ def show_image_with_explain(path: Path, title: str, explain: str):
         st.image(str(path), use_container_width=True)
         st.caption(explain)
     else:
-        st.warning(f"未找到: {path.name}")
+        st.warning(f"Not found: {path.name}")
         st.caption(explain)
 
 
-def render_case_results(case_id: str, output_folder: str, image_size_text: str | None = None):
+def latest_result_file(out_dir: Path, pattern: str) -> Path | None:
+    matches = sorted(out_dir.glob(pattern), key=lambda p: p.stat().st_mtime)
+    return matches[-1] if matches else None
+
+
+def resolve_texture_overlay(case_id: str, output_folder: str | None = None) -> Path:
+    overlay_path = PROJECT_ROOT / "skin_output" / f"texture_overlay_{case_id}.png"
+    texture_path = PROJECT_ROOT / "skin_output" / f"only_texture_line_{case_id}.png"
+    out_dir = OUTPUT_DIR / output_folder if output_folder else None
+    original_path = latest_result_file(out_dir, "00_original__*") if out_dir is not None else None
+    if original_path is None:
+        input_candidates = sorted(INPUT_DIR.glob(f"{case_id}.*"), key=lambda p: p.stat().st_mtime)
+        original_path = input_candidates[-1] if input_candidates else None
+
+    original = imread_unicode(original_path, cv2.IMREAD_COLOR) if original_path is not None else None
+    texture_lines = imread_unicode(texture_path, cv2.IMREAD_GRAYSCALE)
+    if original is not None and texture_lines is not None:
+        if texture_lines.shape != original.shape[:2]:
+            texture_lines = cv2.resize(
+                texture_lines,
+                (original.shape[1], original.shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            )
+        line_mask = texture_lines > 0
+        red_layer = np.zeros_like(original)
+        red_layer[line_mask] = (0, 0, 255)
+        overlay = original.copy()
+        blended = cv2.addWeighted(original, 0.70, red_layer, 0.30, 0)
+        overlay[line_mask] = blended[line_mask]
+
+        ok, encoded = cv2.imencode(".png", overlay)
+        if ok:
+            safe_case_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", case_id)
+            cache_paths = (overlay_path, Path("/tmp") / f"ketas_texture_overlay_{safe_case_id}.png")
+            for cache_path in cache_paths:
+                try:
+                    encoded.tofile(str(cache_path))
+                except OSError:
+                    continue
+                return cache_path
+
+    if overlay_path.exists():
+        return overlay_path
+    comparison_path = PROJECT_ROOT / "skin_output" / f"texture_line_{case_id}.png"
+    return comparison_path if comparison_path.exists() else overlay_path
+
+
+def case_result_images(case_id: str, output_folder: str) -> dict[str, tuple[Path | None, str, str]]:
+    out_dir = OUTPUT_DIR / output_folder
+    try:
+        orientation_full = resolve_predict_output(case_id, "orientation_texture_line_")
+    except Exception:
+        orientation_full = PROJECT_ROOT / "predict_output" / f"orientation_texture_line_{case_id}.png"
+
+    return {
+        "original_image": (
+            latest_result_file(out_dir, "00_original__*"),
+            "Original Image (Output Copy)",
+            "Input image copied into the case output directory.",
+        ),
+        "segmentation_overlay": (
+            out_dir / "segmentation_overlay.png",
+            "Three-Class Segmentation Overlay",
+            "Class boundaries overlaid on the original image.",
+        ),
+        "segmentation_filled": (
+            out_dir / "segmentation_filled.png",
+            "Three-Class Segmentation",
+            "Filled normal-skin, intertidal-zone, and keloid-body classes.",
+        ),
+        "texture_lines": (
+            PROJECT_ROOT / "skin_output" / f"only_texture_line_{case_id}.png",
+            "Texture Lines",
+            "Extracted texture-line signal used by subsequent calculations.",
+        ),
+        "texture_comparison": (
+            resolve_texture_overlay(case_id, output_folder),
+            "Texture Line Overlay",
+            "Extracted texture lines overlaid on the original image.",
+        ),
+        "pixel_texture_axis_map": (
+            orientation_full,
+            "Pixel-Level Texture-Axis Map",
+            "Local texture axes estimated from the structure tensor.",
+        ),
+        "texture_axis_overlay": (
+            out_dir / "texture_direction_overlay.png",
+            "Texture-Axis Overlay",
+            "Texture lines and local texture axes overlaid on the input image.",
+        ),
+        "severity_map": (
+            out_dir / "severity_map.png",
+            "Severity Map",
+            "Final continuous severity output from local density and orientation consistency.",
+        ),
+        "severity_map_overlay": (
+            out_dir / "severity_overlay.png",
+            "Severity Map Overlay",
+            "Severity Map overlaid on the original image.",
+        ),
+        "presence_map": (
+            out_dir / "presence_map.png",
+            "Presence Level",
+            "Discrete presence levels derived from the Severity Map.",
+        ),
+        "presence_level_overlay": (
+            out_dir / "presence_overlay.png",
+            "Presence Level Overlay",
+            "Discrete Presence Levels overlaid on the original image.",
+        ),
+        "worst_area_search_boxes": (
+            latest_result_file(out_dir, "*_worst*_box.png"),
+            "Worst Area Search Boxes",
+            "Candidate search regions selected from high-severity locations.",
+        ),
+        "presence_map_overlay": (
+            latest_result_file(out_dir, "*_worst*_area.png"),
+            "Presence Map Overlay",
+            "Closed high-severity connected regions overlaid on the original image.",
+        ),
+        "regional_mean_direction_map": (
+            latest_result_file(out_dir, "*_worst*_area_direction.png"),
+            "Regional Mean Direction Map",
+            "Direction arrows computed from each complete selected region.",
+        ),
+        "local_direction_map": (
+            latest_result_file(out_dir, "*_worst*_area_local_direction.png"),
+            "Local Direction Map",
+            "Final direction output computed around each constrained arrow origin.",
+        ),
+    }
+
+
+def render_analysis_flow_stage(
+    stage_number: int,
+    title: str,
+    keys: tuple[str, ...],
+    images: dict[str, tuple[Path | None, str, str]],
+    display_settings: dict,
+    final_output_key: str | None = None,
+) -> bool:
+    visible_keys = [key for key in keys if display_enabled(display_settings, "images", key)]
+    if not visible_keys:
+        return False
+
+    final_label = " · Final Output" if final_output_key in visible_keys else ""
+    st.markdown(f"### {stage_number}. {title}{final_label}")
+    columns = st.columns(min(3, len(visible_keys)))
+    for index, key in enumerate(visible_keys):
+        path, image_title, explanation = images[key]
+        with columns[index % len(columns)]:
+            st.markdown(f"**{image_title}**")
+            if path is not None and path.exists():
+                st.image(str(path), width="stretch")
+            else:
+                missing_name = path.name if path is not None else image_title
+                st.warning(f"Not found: {missing_name}")
+            st.caption(explanation)
+    return True
+
+
+def selected_direction_result_key(display_settings: dict) -> str | None:
+    if display_enabled(display_settings, "images", "local_direction_map"):
+        return "local_direction_map"
+    if display_enabled(display_settings, "images", "regional_mean_direction_map"):
+        return "regional_mean_direction_map"
+    return None
+
+
+def render_analysis_overview(
+    case_id: str,
+    output_folder: str,
+    display_settings: dict,
+    image_size_text: str | None = None,
+) -> None:
+    out_dir = OUTPUT_DIR / output_folder
+    st.subheader("Analysis Results")
+    if image_size_text:
+        st.caption(f"Input image size: {image_size_text}")
+    st.caption(f"Output directory: web_demo_output/{output_folder}")
+
+    images = case_result_images(case_id, output_folder)
+    direction_result_key = selected_direction_result_key(display_settings)
+    stages = (
+        (1, "Input", ("original_image",), None),
+        (2, "Three-Class Segmentation", ("segmentation_overlay", "segmentation_filled"), None),
+        (3, "Texture Extraction", ("texture_lines", "texture_comparison"), None),
+        (4, "Texture-Axis Estimation", ("pixel_texture_axis_map", "texture_axis_overlay"), None),
+        (5, "Severity Map", ("severity_map", "severity_map_overlay"), "severity_map_overlay"),
+        (
+            6,
+            "Presence Level",
+            ("presence_map", "presence_level_overlay", "worst_area_search_boxes", "presence_map_overlay"),
+            "presence_map_overlay",
+        ),
+        (7, "Direction Map", ("regional_mean_direction_map", "local_direction_map"), direction_result_key),
+    )
+
+    rendered_any = False
+    for stage_number, title, keys, final_output_key in stages:
+        stage_visible = any(display_enabled(display_settings, "images", key) for key in keys)
+        if rendered_any and stage_visible:
+            st.markdown("<div style='text-align:center;font-size:2rem;line-height:1'>↓</div>", unsafe_allow_html=True)
+        rendered_any = render_analysis_flow_stage(
+            stage_number,
+            title,
+            keys,
+            images,
+            display_settings,
+            final_output_key,
+        ) or rendered_any
+
+    if display_enabled(display_settings, "images", "worst_area_parameters"):
+        info_file = latest_result_file(out_dir, "*_worst*_info.txt")
+        st.markdown("### Supporting Data")
+        st.markdown("**Worst Area Parameters**")
+        if info_file is not None:
+            st.code(info_file.read_text(encoding="utf-8"), language="text")
+        else:
+            st.warning("Worst Area Parameters were not found.")
+
+    if not rendered_any:
+        st.info("No result images are enabled. Select images on the Display Settings page.")
+
+
+OVERVIEW_IMAGE_LABELS = {
+    "original_image": "Original Image",
+    "segmentation_overlay": "Segmentation Overlay",
+    "segmentation_filled": "Segmentation Mask",
+    "texture_lines": "Texture Lines",
+    "texture_comparison": "Texture Line Overlay",
+    "pixel_texture_axis_map": "Pixel Texture Axis",
+    "texture_axis_overlay": "Texture-Axis Overlay",
+    "severity_map": "Severity Map",
+    "severity_map_overlay": "Severity Overlay",
+    "presence_map": "Presence Level",
+    "presence_level_overlay": "Presence-Level Overlay",
+    "worst_area_search_boxes": "Worst Area Search",
+    "presence_map_overlay": "Presence Area Overlay",
+    "regional_mean_direction_map": "Regional Direction",
+    "local_direction_map": "Direction Map",
+}
+
+
+def draw_fitted_text(
+    canvas: np.ndarray,
+    text: str,
+    center_x: int,
+    baseline_y: int,
+    max_width: int,
+    initial_scale: float,
+    color: tuple[int, int, int],
+    thickness: int = 1,
+) -> None:
+    scale = initial_scale
+    while scale > 0.28:
+        (width, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+        if width <= max_width:
+            break
+        scale -= 0.03
+    (width, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+    cv2.putText(
+        canvas,
+        text,
+        (int(center_x - width / 2), baseline_y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        scale,
+        color,
+        thickness,
+        cv2.LINE_AA,
+    )
+
+
+def paste_overview_thumbnail(canvas: np.ndarray, path: Path | None, box: tuple[int, int, int, int]) -> None:
+    x, y, width, height = box
+    cv2.rectangle(canvas, (x, y), (x + width, y + height), (218, 222, 226), 1, cv2.LINE_AA)
+    image = imread_unicode(path, cv2.IMREAD_COLOR) if path is not None and path.exists() else None
+    if image is None:
+        draw_fitted_text(canvas, "Image not found", x + width // 2, y + height // 2, width - 12, 0.42, (110, 110, 110))
+        return
+
+    source_height, source_width = image.shape[:2]
+    scale = min(width / source_width, height / source_height)
+    resized_width = max(1, int(round(source_width * scale)))
+    resized_height = max(1, int(round(source_height * scale)))
+    interpolation = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
+    resized = cv2.resize(image, (resized_width, resized_height), interpolation=interpolation)
+    left = x + (width - resized_width) // 2
+    top = y + (height - resized_height) // 2
+    canvas[top : top + resized_height, left : left + resized_width] = resized
+
+
+def draw_overview_card(
+    canvas: np.ndarray,
+    box: tuple[int, int, int, int],
+    stage_number: int,
+    title: str,
+    keys: tuple[str, ...],
+    images: dict[str, tuple[Path | None, str, str]],
+    display_settings: dict,
+) -> None:
+    x, y, width, height = box
+    cv2.rectangle(canvas, (x, y), (x + width, y + height), (255, 255, 255), -1)
+    cv2.rectangle(canvas, (x, y), (x + width, y + height), (122, 132, 143), 2, cv2.LINE_AA)
+    cv2.rectangle(canvas, (x, y), (x + width, y + 54), (242, 238, 232), -1)
+    draw_fitted_text(canvas, f"{stage_number}. {title}", x + width // 2, y + 35, width - 18, 0.56, (45, 52, 60), 1)
+
+    visible_keys = [key for key in keys if display_enabled(display_settings, "images", key)]
+    if not visible_keys:
+        draw_fitted_text(canvas, "No image selected", x + width // 2, y + height // 2, width - 24, 0.43, (130, 130, 130))
+        return
+
+    content_top = y + 64
+    content_height = height - 74
+    slot_height = content_height // len(visible_keys)
+    for index, key in enumerate(visible_keys):
+        slot_top = content_top + index * slot_height
+        label_height = 24
+        thumbnail_height = max(42, slot_height - label_height - 5)
+        paste_overview_thumbnail(
+            canvas,
+            images[key][0],
+            (x + 10, slot_top, width - 20, thumbnail_height),
+        )
+        draw_fitted_text(
+            canvas,
+            OVERVIEW_IMAGE_LABELS[key],
+            x + width // 2,
+            slot_top + thumbnail_height + 18,
+            width - 18,
+            0.42,
+            (55, 60, 66),
+        )
+
+
+def compose_process_overview(
+    case_id: str,
+    output_folder: str,
+    display_settings: dict,
+) -> np.ndarray:
+    canvas_width, canvas_height = 1920, 940
+    canvas = np.full((canvas_height, canvas_width, 3), (247, 248, 250), dtype=np.uint8)
+    images = case_result_images(case_id, output_folder)
+    direction_result_key = selected_direction_result_key(display_settings)
+    direction_process_keys = tuple(
+        key
+        for key in ("regional_mean_direction_map", "local_direction_map")
+        if key != direction_result_key
+    )
+    stages = (
+        ("Input", ("original_image",)),
+        ("Segmentation", ("segmentation_overlay", "segmentation_filled")),
+        ("Texture Extraction", ("texture_lines", "texture_comparison")),
+        ("Texture Axis", ("pixel_texture_axis_map", "texture_axis_overlay")),
+        ("Severity Analysis", ("severity_map",)),
+        (
+            "Presence Level",
+            ("presence_map", "presence_level_overlay", "worst_area_search_boxes"),
+        ),
+        ("Direction Analysis", direction_process_keys),
+    )
+    result_specs = [
+        ("severity_map_overlay", "SEVERITY MAP OVERLAY", (60, 110, 220), 4),
+        ("presence_map_overlay", "PRESENCE MAP OVERLAY", (35, 165, 225), 5),
+    ]
+    if direction_result_key is not None:
+        direction_title = (
+            "LOCAL DIRECTION MAP"
+            if direction_result_key == "local_direction_map"
+            else "REGIONAL MEAN DIRECTION MAP"
+        )
+        result_specs.append((direction_result_key, direction_title, (175, 95, 145), 6))
+
+    draw_fitted_text(canvas, "KeTAS IMAGE-GENERATION FLOW", canvas_width // 2, 38, 1000, 0.82, (37, 43, 51), 2)
+    cv2.putText(canvas, "PROCESS", (22, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (90, 98, 108), 1, cv2.LINE_AA)
+
+    margin_x, gap = 20, 24
+    stage_y, stage_height = 78, 430
+    stage_width = (canvas_width - 2 * margin_x - gap * (len(stages) - 1)) // len(stages)
+    stage_boxes = [
+        (margin_x + index * (stage_width + gap), stage_y, stage_width, stage_height)
+        for index in range(len(stages))
+    ]
+
+    for left_box, right_box in zip(stage_boxes, stage_boxes[1:]):
+        start = (left_box[0] + left_box[2] + 3, stage_y + stage_height // 2)
+        end = (right_box[0] - 3, stage_y + stage_height // 2)
+        cv2.arrowedLine(canvas, start, end, (92, 101, 112), 3, cv2.LINE_AA, tipLength=0.35)
+
+    result_region = (210, 615, 1500, 300)
+    rx, ry, rw, rh = result_region
+    cv2.rectangle(canvas, (rx, ry), (rx + rw, ry + rh), (238, 241, 246), -1)
+    cv2.rectangle(canvas, (rx, ry), (rx + rw, ry + rh), (126, 136, 150), 2, cv2.LINE_AA)
+    draw_fitted_text(canvas, "RESULTS", canvas_width // 2, ry + 34, 300, 0.72, (42, 49, 58), 2)
+
+    visible_results = [spec for spec in result_specs if display_enabled(display_settings, "images", spec[0])]
+    result_boxes: list[tuple[int, int, int, int]] = []
+    if visible_results:
+        inner_margin, result_gap = 30, 30
+        result_width = min(440, (rw - 2 * inner_margin - result_gap * (len(visible_results) - 1)) // len(visible_results))
+        total_width = result_width * len(visible_results) + result_gap * (len(visible_results) - 1)
+        result_start_x = rx + (rw - total_width) // 2
+        result_boxes = [
+            (result_start_x + index * (result_width + result_gap), ry + 50, result_width, rh - 65)
+            for index in range(len(visible_results))
+        ]
+
+        for index, ((key, _, color, source_stage), result_box) in enumerate(zip(visible_results, result_boxes)):
+            source_box = stage_boxes[source_stage]
+            source = (source_box[0] + source_box[2] // 2, source_box[1] + source_box[3])
+            target_x = result_box[0] + result_box[2] // 2
+            lane_y = 535 + index * 22
+            cv2.line(canvas, source, (source[0], lane_y), color, 4, cv2.LINE_AA)
+            cv2.line(canvas, (source[0], lane_y), (target_x, lane_y), color, 4, cv2.LINE_AA)
+            cv2.arrowedLine(
+                canvas,
+                (target_x, lane_y),
+                (target_x, result_box[1] - 5),
+                color,
+                4,
+                cv2.LINE_AA,
+                tipLength=0.12,
+            )
+    else:
+        draw_fitted_text(
+            canvas,
+            "Final outputs are hidden by Display Settings",
+            canvas_width // 2,
+            ry + rh // 2,
+            rw - 80,
+            0.62,
+            (105, 110, 118),
+        )
+
+    for index, (title, keys) in enumerate(stages):
+        draw_overview_card(canvas, stage_boxes[index], index + 1, title, keys, images, display_settings)
+
+    for (key, title, color, _), box in zip(visible_results, result_boxes):
+        x, y, width, height = box
+        cv2.rectangle(canvas, (x, y), (x + width, y + height), (255, 255, 255), -1)
+        cv2.rectangle(canvas, (x, y), (x + width, y + height), color, 4, cv2.LINE_AA)
+        draw_fitted_text(canvas, title, x + width // 2, y + 31, width - 20, 0.62, color, 2)
+        paste_overview_thumbnail(canvas, images[key][0], (x + 12, y + 43, width - 24, height - 55))
+
+    return cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
+
+
+def render_process_overview(
+    case_id: str,
+    output_folder: str,
+    display_settings: dict,
+    image_size_text: str | None = None,
+) -> None:
+    st.subheader("Process Overview")
+    details = f"Input: {image_size_text} · " if image_size_text else ""
+    st.caption(f"{details}Output: web_demo_output/{output_folder} · Visibility follows Display Settings")
+    overview = compose_process_overview(case_id, output_folder, display_settings)
+    st.image(overview, width="stretch")
+
+
+def render_case_results(
+    case_id: str,
+    output_folder: str,
+    display_settings: dict,
+    image_size_text: str | None = None,
+):
     out_dir = OUTPUT_DIR / output_folder
     if image_size_text:
-        st.caption(f"当前输入图片尺寸: {image_size_text}")
-    st.caption(f"当前输出目录: web_demo_output/{output_folder}")
-    try:
-        orientation_full_show = resolve_predict_output(case_id, "orientation_texture_line_")
-    except Exception:
-        orientation_full_show = PROJECT_ROOT / "predict_output" / f"orientation_texture_line_{case_id}.png"
-    try:
-        sector_vis_show = resolve_predict_output(case_id, "spatial_sector_directions_")
-    except Exception:
-        sector_vis_show = PROJECT_ROOT / "predict_output" / f"spatial_sector_directions_{case_id}.png"
+        st.caption(f"Input image size: {image_size_text}")
+    st.caption(f"Output directory: web_demo_output/{output_folder}")
 
-    st.subheader("中间结果总览")
-    copied_original = sorted(out_dir.glob("00_original__*"), key=lambda p: p.stat().st_mtime)
-    if copied_original:
+    intermediate_keys = (
+        "original_image",
+        "segmentation_overlay",
+        "segmentation_filled",
+        "texture_lines",
+        "texture_comparison",
+        "pixel_texture_axis_map",
+        "texture_axis_overlay",
+    )
+    if any(display_enabled(display_settings, "images", key) for key in intermediate_keys):
+        st.subheader("Intermediate Results")
+
+    if display_enabled(display_settings, "images", "original_image"):
+        copied_original = sorted(out_dir.glob("00_original__*"), key=lambda p: p.stat().st_mtime)
+        if copied_original:
+            show_image_with_explain(
+                copied_original[-1],
+                "Original Image (Output Copy)",
+                "A copy of the uploaded image stored in web_demo_output for review and result comparison.",
+            )
+    if display_enabled(display_settings, "images", "segmentation_overlay"):
+        show_image_with_explain(out_dir / "segmentation_overlay.png", "Three-Class Segmentation Overlay", "Overlays normal skin, intertidal zone, and keloid body boundaries on the original image.")
+    if display_enabled(display_settings, "images", "segmentation_filled"):
+        show_image_with_explain(out_dir / "segmentation_filled.png", "Three-Class Segmentation", "Fills normal skin, intertidal zone, and keloid body with distinct colors.")
+    if display_enabled(display_settings, "images", "texture_lines"):
+        show_image_with_explain(PROJECT_ROOT / "skin_output" / f"only_texture_line_{case_id}.png", "Texture Lines", "Contains only the extracted texture-line signal used for orientation analysis and local scoring.")
+    if display_enabled(display_settings, "images", "texture_comparison"):
+        show_image_with_explain(resolve_texture_overlay(case_id, output_folder), "Texture Line Overlay", "Overlays the extracted texture lines on the original image.")
+    if display_enabled(display_settings, "images", "pixel_texture_axis_map"):
+        try:
+            orientation_full_show = resolve_predict_output(case_id, "orientation_texture_line_")
+        except Exception:
+            orientation_full_show = PROJECT_ROOT / "predict_output" / f"orientation_texture_line_{case_id}.png"
+        show_image_with_explain(orientation_full_show, "Pixel-Level Texture-Axis Map", "Shows structure-tensor texture axes in the image context.")
+    if display_enabled(display_settings, "images", "texture_axis_overlay"):
         show_image_with_explain(
-            copied_original[-1],
-            "原图（已复制到输出目录）",
-            "这是上传原图在 web_demo_output 中的副本，便于后续查阅与结果对照。",
+            out_dir / "texture_direction_overlay.png",
+            "Texture-Axis Overlay",
+            "Overlays semi-transparent red texture lines and blue local texture-axis markers on the original image.",
         )
-    show_image_with_explain(out_dir / "segmentation_overlay.png", "分割叠加图", "显示三分类分割结果叠加在原图上，用于快速检查分割边界是否合理。")
-    show_image_with_explain(out_dir / "segmentation_filled.png", "分割填充图", "将各类别区域直接上色填充，便于查看面积分布与类别关系。")
-    show_image_with_explain(PROJECT_ROOT / "skin_output" / f"only_texture_line_{case_id}.png", "纯纹理线条", "仅保留纹理线条信号，作为方向分析与局部评分的核心输入。")
-    show_image_with_explain(PROJECT_ROOT / "skin_output" / f"texture_line_{case_id}.png", "纹理对比图", "展示原图、纹理线条和叠加效果，帮助判断纹理提取是否过强或过弱。")
-    show_image_with_explain(orientation_full_show, "方向图（含背景）", "在背景上下文中查看方向信息，更容易定位方向异常区域。")
-    show_image_with_explain(
-        out_dir / "texture_direction_overlay.png",
-        "纹理走向叠加图",
-        "在原图上叠加纹理线与局部方向，不显示最密集扇区框、主方向箭头和文字。",
-    )
-    show_image_with_explain(sector_vis_show, "8扇区分析", "把区域划分为8个扇区，比较各扇区纹理密度与方向一致性。")
 
-    st.subheader("热图与最严重框")
-    show_image_with_explain(out_dir / "severity_map.png", "Severity Map", "像素级严重度图，分数由纹理密度与方向一致性加权得到。")
-    show_image_with_explain(out_dir / "presence_map.png", "Presence Map", "按你设置的阈值/分位把严重度分档着色，最高档固定为红色。")
-    show_image_with_explain(out_dir / "severity_overlay.png", "Severity Overlay", "将 Severity Map 叠加到原图，方便观察高分区与真实组织位置关系。")
-    show_image_with_explain(out_dir / "presence_overlay.png", "Presence Overlay", "将 Presence 分级结果叠加到原图，用于直观查看各档分布范围。")
-
-    worst_box_img = sorted(out_dir.glob("*_worst*_box.png"), key=lambda p: p.stat().st_mtime)
-    worst_dir_img = sorted(
-        [p for p in out_dir.glob("*_worst*_direction.png") if "_area_" not in p.name],
-        key=lambda p: p.stat().st_mtime,
+    indicator_keys = (
+        "severity_map",
+        "presence_map",
+        "severity_map_overlay",
+        "presence_level_overlay",
+        "worst_area_search_boxes",
+        "presence_map_overlay",
+        "regional_mean_direction_map",
+        "local_direction_map",
+        "worst_area_parameters",
     )
-    worst_area_img = sorted(out_dir.glob("*_worst*_area.png"), key=lambda p: p.stat().st_mtime)
-    worst_area_dir_img = sorted(out_dir.glob("*_worst*_area_direction.png"), key=lambda p: p.stat().st_mtime)
-    worst_area_local_dir_img = sorted(
-        out_dir.glob("*_worst*_area_local_direction.png"),
-        key=lambda p: p.stat().st_mtime,
-    )
-    if worst_box_img:
-        show_image_with_explain(worst_box_img[-1], "最严重框", "在目标区域内筛选出的高严重度框，支持1~5个不重叠框。")
-    if worst_area_img:
-        show_image_with_explain(worst_area_img[-1], "Worst Area 联通区域", "显示每个最严重框对应的高分联通区域以及种子点，联通阈值由侧边栏 Worst Area 联通百分位控制。")
-    if worst_area_dir_img:
-        show_image_with_explain(worst_area_dir_img[-1], "Worst Area 方向图", "箭头从外层边界内侧 10 像素约束带中的最严重点出发，方向取整个 Worst Area 的平均纹理方向。")
-    if worst_area_local_dir_img:
-        show_image_with_explain(worst_area_local_dir_img[-1], "Worst Area 局部方向图", "箭头起点使用同一边界约束，方向取起点附近“局部箭头方向半径”像素圆形邻域的平均纹理方向。")
-    if worst_dir_img:
-        show_image_with_explain(worst_dir_img[-1], "框内方向", "在最严重框中心绘制主方向箭头，反映该区域主要纹理方向。")
+    if any(display_enabled(display_settings, "images", key) for key in indicator_keys):
+        st.subheader("Quantitative Indicators and Worst Areas")
 
-    info_files = sorted(out_dir.glob("*_worst*_info.txt"))
-    if info_files:
-        st.markdown("**最严重框参数文本**")
-        st.code(info_files[-1].read_text(encoding="utf-8"), language="text")
+    if display_enabled(display_settings, "images", "severity_map"):
+        show_image_with_explain(out_dir / "severity_map.png", "Severity Map", "Within-image relative severity computed from Local Texture Density and Local Orientation Consistency.")
+    if display_enabled(display_settings, "images", "presence_map"):
+        show_image_with_explain(out_dir / "presence_map.png", "Presence Level", "A discrete-level visualization of Severity Map values using score thresholds or within-image percentiles.")
+    if display_enabled(display_settings, "images", "severity_map_overlay"):
+        show_image_with_explain(out_dir / "severity_overlay.png", "Severity Map Overlay", "Overlays the within-image relative Severity Map on the original image.")
+    if display_enabled(display_settings, "images", "presence_level_overlay"):
+        show_image_with_explain(out_dir / "presence_overlay.png", "Presence Level Overlay", "Overlays the discrete Presence Levels on the original image.")
+
+    if display_enabled(display_settings, "images", "worst_area_search_boxes"):
+        worst_box_img = sorted(out_dir.glob("*_worst*_box.png"), key=lambda p: p.stat().st_mtime)
+        if worst_box_img:
+            show_image_with_explain(worst_box_img[-1], "Worst Area Search Boxes", "Candidate boxes used to seed 1 to 5 non-overlapping Worst Areas within the Effective Intertidal Zone.")
+    if display_enabled(display_settings, "images", "presence_map_overlay"):
+        worst_area_img = sorted(out_dir.glob("*_worst*_area.png"), key=lambda p: p.stat().st_mtime)
+        if worst_area_img:
+            show_image_with_explain(worst_area_img[-1], "Presence Map Overlay", "Overlays each closed and externally filled 8-connected high-severity region on the original image.")
+    if display_enabled(display_settings, "images", "regional_mean_direction_map"):
+        worst_area_dir_img = sorted(out_dir.glob("*_worst*_area_direction.png"), key=lambda p: p.stat().st_mtime)
+        if worst_area_dir_img:
+            show_image_with_explain(worst_area_dir_img[-1], "Regional Mean Direction Map", "Each arrow starts at the highest-severity point in the 10-pixel inner boundary band and uses the mean texture axis of the entire Worst Area.")
+    if display_enabled(display_settings, "images", "local_direction_map"):
+        worst_area_local_dir_img = sorted(
+            out_dir.glob("*_worst*_area_local_direction.png"),
+            key=lambda p: p.stat().st_mtime,
+        )
+        if worst_area_local_dir_img:
+            show_image_with_explain(worst_area_local_dir_img[-1], "Local Direction Map", "Uses the same constrained arrow origin and averages the texture axis within the independently adjustable Local Direction Radius.")
+    if display_enabled(display_settings, "images", "worst_area_parameters"):
+        info_files = sorted(out_dir.glob("*_worst*_info.txt"))
+        if info_files:
+            st.markdown("**Worst Area Parameters**")
+            st.code(info_files[-1].read_text(encoding="utf-8"), language="text")
 
 
 def app():
-    st.set_page_config(page_title="皮肤纹理方向分析 Demo", layout="wide")
+    st.set_page_config(page_title="Keloid Texture Analysis System (KeTAS) Demo", layout="wide")
 
     st.markdown(
         """
@@ -971,18 +1722,63 @@ def app():
         unsafe_allow_html=True,
     )
 
-    st.title("皮肤纹理方向分析 Demo")
-    st.caption("上传图片 -> 生成全流程中间结果 -> 调参重算热图/Presence/最严重框")
+    page = st.sidebar.radio(
+        "Page",
+        options=["Analysis", "Process Overview", "Display Settings"],
+        key="demo_page",
+    )
+    display_settings = load_display_settings()
+    previous_page = st.session_state.get("_active_demo_page")
+    if page != "Analysis":
+        cache_parameter_session_state()
+        st.session_state["_active_demo_page"] = page
+        if page == "Display Settings":
+            render_display_settings_page(display_settings)
+            return
+
+        batch_records = st.session_state.get("batch_records", [])
+        if batch_records:
+            options = [f"{item['index']:02d}. {item['original_name']}" for item in batch_records]
+            selected = st.sidebar.selectbox(
+                "Select an image to view its process",
+                options=options,
+                key="batch_overview_select",
+            )
+            selected_item = batch_records[options.index(selected)]
+            render_process_overview(
+                case_id=selected_item["case_id"],
+                output_folder=selected_item["output_folder"],
+                display_settings=display_settings,
+                image_size_text=selected_item.get("image_size_text"),
+            )
+        elif st.session_state.get("case_id") is not None:
+            case_id = st.session_state["case_id"]
+            render_process_overview(
+                case_id=case_id,
+                output_folder=st.session_state.get("output_folder") or case_id,
+                display_settings=display_settings,
+                image_size_text=st.session_state.get("image_size_text"),
+            )
+        else:
+            st.title("Process Overview")
+            st.info("Run an analysis first to view its complete generation flow.")
+        return
+    if previous_page not in (None, "Analysis"):
+        restore_cached_parameter_session_state()
+    st.session_state["_active_demo_page"] = page
+
+    st.title("Keloid Texture Analysis System (KeTAS) Demo")
+    st.caption("Three-class U-Net segmentation and Gabor-gradient-domain analysis for Severity Maps, Presence Levels, and Direction Maps")
 
     if cv2 is None:
-        st.error("当前 Python 环境缺少 OpenCV，无法运行图像处理流程。")
+        st.error("OpenCV is not available in the current Python environment, so the image-processing pipeline cannot run.")
         st.code(
             "python3 -m pip install --user opencv-python\n"
-            "# 如果提示 libGL.so.1 缺失，可执行：\n"
+            "# If libGL.so.1 is missing, run:\n"
             "sudo apt-get update && sudo apt-get install -y libgl1 libglib2.0-0"
         )
         if _CV2_IMPORT_ERROR is not None:
-            st.text(f"OpenCV 导入错误: {_CV2_IMPORT_ERROR}")
+            st.text(f"OpenCV import error: {_CV2_IMPORT_ERROR}")
         st.stop()
 
     init_params_state_once()
@@ -992,30 +1788,34 @@ def app():
     if isinstance(pending_params, dict):
         apply_params_to_session(normalize_params_dict(pending_params))
         st.session_state["_pending_params_to_apply"] = None
+        cache_parameter_session_state()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    st.sidebar.markdown(f"**设备**: {device}")
+    st.sidebar.markdown(f"**Device**: {device}")
 
-    model_rel = st.sidebar.text_input(
-        "模型文件",
-        key="p_model_rel",
-        help="用于分割预测的模型权重文件路径（相对项目根目录）。",
-    )
+    if display_enabled(display_settings, "parameters", "model_file"):
+        model_rel = st.sidebar.text_input(
+            "Model File",
+            key="p_model_rel",
+            help="Path to the segmentation model weights, relative to the project root.",
+        )
+    else:
+        model_rel = str(st.session_state["p_model_rel"])
     model_path = (PROJECT_ROOT / model_rel).resolve()
     if not model_path.exists():
-        st.sidebar.error("模型文件不存在，请修改路径")
+        st.sidebar.error("The model file does not exist. Enable Model File in Display Settings to change it.")
 
     uploaded = st.file_uploader(
-        "选择图片文件",
+        "Select an Image",
         type=["jpg", "jpeg", "png", "bmp", "tif", "tiff"],
-        help="上传待分析图片。系统会生成分割、纹理、方向、热图和最严重框等中间结果。",
+        help="Upload a keloid image to generate three-class segmentation, texture-line, Severity Map, Presence Level, Worst Area, and Direction Map results.",
     )
     batch_uploaded = st.file_uploader(
-        "批量选择图片文件",
+        "Select Images for Batch Processing",
         type=["jpg", "jpeg", "png", "bmp", "tif", "tiff"],
         accept_multiple_files=True,
         key="batch_uploader",
-        help="可一次选择多张图片批量运行。结果会保存到同一批次目录下。",
+        help="Select multiple images to process them with the same parameters and save them under one batch directory.",
     )
 
     if "image_path" not in st.session_state:
@@ -1047,9 +1847,9 @@ def app():
         original_for_size = imread_unicode(image_path, cv2.IMREAD_COLOR)
         if original_for_size is not None:
             h, w = original_for_size.shape[:2]
-            st.session_state["image_size_text"] = f"{w}×{h} 像素"
+            st.session_state["image_size_text"] = f"{w} x {h} pixels"
         else:
-            st.session_state["image_size_text"] = "读取失败"
+            st.session_state["image_size_text"] = "Read failed"
 
     current_output_folder = st.session_state.get("output_folder")
     if current_output_folder and st.session_state.get("_params_loaded_for_output_folder") != current_output_folder:
@@ -1061,154 +1861,236 @@ def app():
         st.session_state["_params_loaded_for_output_folder"] = current_output_folder
         st.rerun()
 
-    st.sidebar.header("热图参数")
-    target_class = st.sidebar.selectbox(
-        "目标类别",
-        options=[1, 2],
-        key="p_target_class",
-        help="选择做局部评分的区域类别。1通常为有效病灶区域，2通常为更核心区域。",
+    severity_parameter_keys = (
+        "target_class",
+        "radius_mode",
+        "heatmap_radius",
+        "density_weight",
+        "consistency_weight",
+        "severity_overlay_opacity",
     )
-    radius_mode = st.sidebar.selectbox(
-        "Radius模式",
-        options=["动态", "固定"],
-        key="p_radius_mode",
-        help="动态：按图像大小自动设半径；固定：使用你指定的像素半径。",
-    )
-    fixed_radius = None
-    if radius_mode == "固定":
-        fixed_radius = st.sidebar.number_input(
-            "Heatmap Radius",
-            min_value=8,
-            max_value=120,
-            step=1,
-            key="p_fixed_radius",
-            help="局部统计窗口半径（像素）。越大越平滑，越小越敏感。",
+    if any(display_enabled(display_settings, "parameters", key) for key in severity_parameter_keys):
+        st.sidebar.header("Severity Map Parameters")
+
+    if display_enabled(display_settings, "parameters", "target_class"):
+        target_class = st.sidebar.selectbox(
+            "Target Class",
+            options=[1, 2],
+            key="p_target_class",
+            help="Select the segmented class used for local scoring. Class 1 is the Intertidal Zone and class 2 is the Keloid Body.",
         )
+    else:
+        target_class = int(st.session_state["p_target_class"])
 
-    density_weight = st.sidebar.number_input(
-        "密度权重",
-        min_value=0.0,
-        max_value=1.0,
-        step=0.05,
-        format="%.2f",
-        key="p_density_weight",
-        help="严重度评分中“纹理密度”项的权重。",
-    )
-    consistency_weight = st.sidebar.number_input(
-        "一致性权重",
-        min_value=0.0,
-        max_value=1.0,
-        step=0.05,
-        format="%.2f",
-        key="p_consistency_weight",
-        help="严重度评分中“方向一致性”项的权重。",
-    )
-    heat_alpha = st.sidebar.number_input(
-        "热图叠加透明度",
-        min_value=0.1,
-        max_value=0.9,
-        step=0.05,
-        format="%.2f",
-        key="p_heat_alpha",
-        help="Severity Overlay 中热图颜色叠加到原图的强度。",
-    )
+    if display_enabled(display_settings, "parameters", "radius_mode"):
+        radius_mode = st.sidebar.selectbox(
+            "Radius Mode",
+            options=["Dynamic", "Fixed"],
+            key="p_radius_mode",
+            help="Dynamic scales the radius with image size; Fixed uses the specified pixel radius.",
+        )
+    else:
+        radius_mode = str(st.session_state["p_radius_mode"])
+    fixed_radius = None
+    if radius_mode == "Fixed":
+        if display_enabled(display_settings, "parameters", "heatmap_radius"):
+            fixed_radius = st.sidebar.number_input(
+                "Heatmap Radius",
+                min_value=8,
+                max_value=120,
+                step=1,
+                key="p_fixed_radius",
+                help="Radius of the local statistics window in pixels. Larger values are smoother; smaller values are more sensitive.",
+            )
+        else:
+            fixed_radius = int(st.session_state["p_fixed_radius"])
 
-    st.sidebar.header("Presence参数")
-    n_bins = st.sidebar.number_input(
-        "Presence分级数",
-        min_value=2,
-        max_value=6,
-        step=1,
-        key="p_n_bins",
-        help="Presence Map 分成多少档颜色等级。",
+    if display_enabled(display_settings, "parameters", "density_weight"):
+        density_weight = st.sidebar.number_input(
+            "Local Texture Density Weight",
+            min_value=0.0,
+            max_value=1.0,
+            step=0.05,
+            format="%.2f",
+            key="p_density_weight",
+            help="Weight of local texture density in the severity score.",
+        )
+    else:
+        density_weight = float(st.session_state["p_density_weight"])
+
+    if display_enabled(display_settings, "parameters", "consistency_weight"):
+        consistency_weight = st.sidebar.number_input(
+            "Local Orientation Consistency Weight",
+            min_value=0.0,
+            max_value=1.0,
+            step=0.05,
+            format="%.2f",
+            key="p_consistency_weight",
+            help="Weight of local orientation consistency in the severity score.",
+        )
+    else:
+        consistency_weight = float(st.session_state["p_consistency_weight"])
+
+    if display_enabled(display_settings, "parameters", "severity_overlay_opacity"):
+        heat_alpha = st.sidebar.number_input(
+            "Severity Map Overlay Opacity",
+            min_value=0.1,
+            max_value=0.9,
+            step=0.05,
+            format="%.2f",
+            key="p_heat_alpha",
+            help="Strength of the Severity Map colors overlaid on the original image.",
+        )
+    else:
+        heat_alpha = float(st.session_state["p_heat_alpha"])
+
+    presence_parameter_keys = (
+        "presence_levels",
+        "presence_split_mode",
+        "presence_cutoffs",
+        "worst_area_percentile",
     )
+    if any(display_enabled(display_settings, "parameters", key) for key in presence_parameter_keys):
+        st.sidebar.header("Presence Parameters")
+
+    if display_enabled(display_settings, "parameters", "presence_levels"):
+        n_bins = st.sidebar.number_input(
+            "Number of Presence Levels",
+            min_value=2,
+            max_value=6,
+            step=1,
+            key="p_n_bins",
+            help="Number of color-coded Presence Levels.",
+        )
+    else:
+        n_bins = int(st.session_state["p_n_bins"])
     n_bins = int(n_bins)
-    presence_mode = st.sidebar.selectbox(
-        "Presence划分模式",
-        options=["threshold", "quantile"],
-        key="p_presence_mode",
-        help="threshold：按固定阈值切分；quantile：按分位数切分。",
-    )
+    if display_enabled(display_settings, "parameters", "presence_split_mode"):
+        presence_mode = st.sidebar.selectbox(
+            "Presence Split Mode",
+            options=["threshold", "quantile"],
+            key="p_presence_mode",
+            help="threshold uses fixed score cutoffs; quantile uses percentiles of the score distribution.",
+        )
+    else:
+        presence_mode = str(st.session_state["p_presence_mode"])
     presence_cuts = []
-    if presence_mode == "threshold":
-        st.sidebar.caption("阈值模式：每个划分线是0~1范围，按归一化分数直接切分")
+    show_presence_cutoffs = display_enabled(display_settings, "parameters", "presence_cutoffs")
+    if presence_mode == "threshold" and show_presence_cutoffs:
+        st.sidebar.caption("Threshold mode: each cutoff is in [0, 1] and directly splits the normalized score.")
         for i in range(n_bins - 1):
             v = st.sidebar.number_input(
-                f"阈值线{i + 1}",
+                f"Threshold {i + 1}",
                 min_value=0.0,
                 max_value=1.0,
                 step=0.01,
                 format="%.2f",
                 key=f"p_presence_cut_{i}",
-                help="第{i}到第{i+1}档的分界阈值（0~1）。",
+                help=f"Threshold between levels {i + 1} and {i + 2}, in the range [0, 1].",
             )
             presence_cuts.append(v)
-    else:
-        st.sidebar.caption("分位模式：每个划分线是0~100分位，按mask内分数分布切分")
+    elif presence_mode == "quantile" and show_presence_cutoffs:
+        st.sidebar.caption("Quantile mode: each cutoff is a percentile in [0, 100] based on scores inside the mask.")
         for i in range(n_bins - 1):
             q = st.sidebar.number_input(
-                f"分位线{i + 1} (%)",
+                f"Quantile {i + 1} (%)",
                 min_value=0.0,
                 max_value=100.0,
                 step=1.0,
                 format="%.1f",
                 key=f"p_presence_cut_{i}",
-                help="第{i}到第{i+1}档的分界分位点（0~100%）。",
+                help=f"Percentile boundary between levels {i + 1} and {i + 2}, in the range [0, 100].",
             )
             presence_cuts.append(q)
+    else:
+        presence_cuts = [
+            float(st.session_state.get(f"p_presence_cut_{i}", 0.0))
+            for i in range(n_bins - 1)
+        ]
     presence_cuts = _normalize_presence_cuts([float(v) for v in presence_cuts], n_bins, presence_mode)
 
-    st.sidebar.header("最严重框参数")
-    box_mode = st.sidebar.selectbox(
-        "Box Size模式",
-        options=["动态", "固定"],
-        key="p_box_mode",
-        help="动态：按图像大小自动设框边长；固定：使用你指定的框大小。",
-    )
-    box_size = None
-    if box_mode == "固定":
-        box_size = st.sidebar.number_input(
-            "Box Size",
-            min_value=24,
-            max_value=240,
-            step=2,
-            key="p_box_size",
-            help="最严重框的边长（像素）。",
+    if display_enabled(display_settings, "parameters", "worst_area_percentile"):
+        area_percentile = st.sidebar.number_input(
+            "Worst Area Severity Percentile (q)",
+            min_value=0.0,
+            max_value=100.0,
+            step=1.0,
+            format="%.1f",
+            key="p_area_percentile",
+            help="Quantile threshold used to extract connected Worst Areas. The default of 80 retains approximately the highest-scoring 20%.",
         )
-    num_boxes = st.sidebar.number_input(
-        "框数量",
-        min_value=1,
-        max_value=5,
-        step=1,
-        key="p_num_boxes",
-        help="输出几个不重叠的高严重度区域框（1~5）。",
+    else:
+        area_percentile = float(st.session_state["p_area_percentile"])
+
+    worst_area_parameter_keys = (
+        "box_size_mode",
+        "box_size",
+        "number_of_boxes",
+        "minimum_mask_coverage",
     )
-    min_overlap = st.sidebar.number_input(
-        "最小mask覆盖率",
-        min_value=0.0,
-        max_value=0.95,
-        step=0.01,
-        format="%.2f",
-        key="p_min_overlap",
-        help="候选框中有效区域像素占比下限。值越大，框越集中在目标区域内。",
-    )
-    area_percentile = st.sidebar.number_input(
-        "Worst Area联通百分位",
-        min_value=0.0,
-        max_value=100.0,
-        step=1.0,
-        format="%.1f",
-        key="p_area_percentile",
-        help="提取 Worst Area 联通区域时使用的分位数阈值。默认80表示保留分数最高约20%的高分区域。",
-    )
-    local_direction_radius = st.sidebar.number_input(
-        "局部箭头方向半径",
-        min_value=1,
-        max_value=240,
-        step=1,
-        key="p_local_direction_radius",
-        help="仅控制 Worst Area 局部方向图：统计箭头起点周围多少像素半径内的平均纹理方向，不影响热图。",
-    )
+    if any(display_enabled(display_settings, "parameters", key) for key in worst_area_parameter_keys):
+        st.sidebar.header("Worst Area Parameters")
+
+    if display_enabled(display_settings, "parameters", "box_size_mode"):
+        box_mode = st.sidebar.selectbox(
+            "Box Size Mode",
+            options=["Dynamic", "Fixed"],
+            key="p_box_mode",
+            help="Dynamic scales the box with image size; Fixed uses the specified box size.",
+        )
+    else:
+        box_mode = str(st.session_state["p_box_mode"])
+    box_size = None
+    if box_mode == "Fixed":
+        if display_enabled(display_settings, "parameters", "box_size"):
+            box_size = st.sidebar.number_input(
+                "Box Size",
+                min_value=24,
+                max_value=240,
+                step=2,
+                key="p_box_size",
+                help="Side length of each worst-area search box in pixels.",
+            )
+        else:
+            box_size = int(st.session_state["p_box_size"])
+
+    if display_enabled(display_settings, "parameters", "number_of_boxes"):
+        num_boxes = st.sidebar.number_input(
+            "Number of Boxes",
+            min_value=1,
+            max_value=5,
+            step=1,
+            key="p_num_boxes",
+            help="Number of non-overlapping high-severity boxes to select, from 1 to 5.",
+        )
+    else:
+        num_boxes = int(st.session_state["p_num_boxes"])
+
+    if display_enabled(display_settings, "parameters", "minimum_mask_coverage"):
+        min_overlap = st.sidebar.number_input(
+            "Minimum Mask Coverage",
+            min_value=0.0,
+            max_value=0.95,
+            step=0.01,
+            format="%.2f",
+            key="p_min_overlap",
+            help="Minimum fraction of valid-region pixels inside a candidate box. Higher values keep boxes closer to the target region.",
+        )
+    else:
+        min_overlap = float(st.session_state["p_min_overlap"])
+
+    if display_enabled(display_settings, "parameters", "local_direction_radius"):
+        st.sidebar.header("Direction Parameters")
+        local_direction_radius = st.sidebar.number_input(
+            "Local Direction Radius",
+            min_value=1,
+            max_value=240,
+            step=1,
+            key="p_local_direction_radius",
+            help="Radius used by the Local Direction Map to average texture axes around the arrow origin. It is independent of Heatmap Radius.",
+        )
+    else:
+        local_direction_radius = int(st.session_state["p_local_direction_radius"])
     num_boxes = int(num_boxes)
     local_direction_radius = int(local_direction_radius)
     if fixed_radius is not None:
@@ -1216,36 +2098,37 @@ def app():
     if box_size is not None:
         box_size = int(box_size)
 
-    with st.sidebar.expander("参数解释总览", expanded=False):
-        st.markdown(
-            "- 目标类别：决定在哪个分割区域上计算严重度。\n"
-            "- Radius：局部统计邻域大小，影响热图平滑程度。\n"
-            "- 纹理像素：直接使用Canny与形态学处理后的原始二值纹理线。\n"
-            "- 密度/一致性权重：共同决定严重度分数。\n"
-            "- Presence模式：threshold按固定分数切，quantile按分位切。\n"
-            "- Box参数：控制最严重框的大小、数量和有效区域约束。\n"
-            "- 局部箭头方向半径：只控制箭头起点附近的方向统计范围，与 Heatmap Radius 独立。"
-        )
+    if display_enabled(display_settings, "parameters", "parameter_guide"):
+        with st.sidebar.expander("Parameter Guide", expanded=False):
+            st.markdown(
+                "- Target Class: selects the segmented region used for Severity Map computation.\n"
+                "- Heatmap Radius: sets the disk neighborhood for Local Texture Density and Local Orientation Consistency.\n"
+                "- Texture Points: all nonzero pixels in the unresampled binary texture-line image are used directly.\n"
+                "- Density/Consistency Weights: jointly determine within-image relative severity.\n"
+                "- Presence Mode: threshold uses fixed scores; quantile uses within-mask score percentiles.\n"
+                "- Worst Area Parameters: control seed-box size, region count, mask coverage, and the high-severity percentile.\n"
+                "- Local Direction Radius: controls texture-axis averaging around the arrow origin independently of Heatmap Radius."
+            )
 
     st.sidebar.markdown('<div class="floating-actions">', unsafe_allow_html=True)
-    st.sidebar.subheader("运行按钮")
-    run_all = st.sidebar.button("1) 生成全流程", help="首次运行建议点击，生成全部中间结果与可视化。")
-    rerun_part = st.sidebar.button("2) 仅重算热图/框", help="不重跑分割和方向，仅按当前参数更新热图与最严重框。")
-    run_batch = st.sidebar.button("3) 批量处理", help="对批量上传的多张图按当前参数一次性处理。")
-    st.sidebar.caption("滚动页面时该按钮区会固定显示。")
+    st.sidebar.subheader("Run")
+    run_all = st.sidebar.button("1) Run Full Pipeline", help="Recommended for the first run; generates all intermediate results and visualizations.")
+    rerun_part = st.sidebar.button("2) Recompute Indicators and Areas", help="Updates Severity Maps, Presence Levels, and Worst Areas without rerunning segmentation or texture-axis extraction.")
+    run_batch = st.sidebar.button("3) Process Batch", help="Processes all batch-uploaded images once using the current parameters.")
+    st.sidebar.caption("This action panel remains visible while scrolling.")
     st.sidebar.markdown("</div>", unsafe_allow_html=True)
 
     if st.session_state["case_id"] is not None:
-        st.info(f"当前样本ID: {st.session_state['case_id']}")
-        st.caption(f"输入图片尺寸: {st.session_state['image_size_text']}")
-        st.caption(f"输出目录: web_demo_output/{st.session_state['output_folder']}")
+        st.info(f"Current case ID: {st.session_state['case_id']}")
+        st.caption(f"Input image size: {st.session_state['image_size_text']}")
+        st.caption(f"Output directory: web_demo_output/{st.session_state['output_folder']}")
 
     if run_all:
         if st.session_state["image_path"] is None:
-            st.error("请先上传图片")
+            st.error("Upload an image first.")
             st.stop()
         if not model_path.exists():
-            st.error("模型路径无效")
+            st.error("The model path is invalid.")
             st.stop()
 
         st.session_state["batch_records"] = []
@@ -1269,7 +2152,7 @@ def app():
             area_percentile=area_percentile,
             local_direction_radius=local_direction_radius,
         )
-        with st.spinner("正在生成全流程中间结果..."):
+        with st.spinner("Generating full-pipeline intermediate results..."):
             image_path = Path(st.session_state["image_path"])
             case_id = st.session_state["case_id"]
             output_folder = st.session_state["output_folder"] or case_id
@@ -1295,28 +2178,28 @@ def app():
                 local_direction_radius=local_direction_radius,
                 device=device,
             )
-        st.success(f"完成。radius={heat_info['radius']}，box_size={heat_info['box_size']}")
+        st.success(f"Completed. radius={heat_info['radius']}, box_size={heat_info['box_size']}")
         run_params_path = save_params_to_output_dir(
             out_dir=Path(heat_info["out_dir"]),
             input_image_path=image_path,
             params_snapshot=params_snapshot,
             heat_info=heat_info,
         )
-        st.caption(f"参数已保存: {run_params_path.name}")
+        st.caption(f"Parameters saved: {run_params_path.name}")
         if heat_info.get("presence_mode") == "quantile":
             st.caption(
-                f"Presence分位线(%): {heat_info['presence_cuts']} -> 实际阈值: "
+                f"Presence quantiles (%): {heat_info['presence_cuts']} -> effective thresholds: "
                 f"{[round(v, 4) for v in heat_info['presence_thresholds']]}"
             )
         else:
-            st.caption(f"Presence阈值线: {[round(v, 4) for v in heat_info['presence_thresholds']]}")
+            st.caption(f"Presence thresholds: {[round(v, 4) for v in heat_info['presence_thresholds']]}")
 
     if rerun_part:
         if st.session_state["image_path"] is None:
-            st.error("请先上传图片并至少跑一次全流程")
+            st.error("Upload an image and run the full pipeline at least once.")
             st.stop()
         if not model_path.exists():
-            st.error("模型路径无效")
+            st.error("The model path is invalid.")
             st.stop()
 
         st.session_state["batch_records"] = []
@@ -1340,7 +2223,7 @@ def app():
             area_percentile=area_percentile,
             local_direction_radius=local_direction_radius,
         )
-        with st.spinner("正在按新参数重算热图和最严重框..."):
+        with st.spinner("Recomputing Severity Maps, Presence Levels, and Worst Areas with the current parameters..."):
             image_path = Path(st.session_state["image_path"])
             case_id = st.session_state["case_id"]
             output_folder = st.session_state["output_folder"] or case_id
@@ -1365,28 +2248,28 @@ def app():
                 local_direction_radius=local_direction_radius,
                 device=device,
             )
-        st.success(f"重算完成。radius={heat_info['radius']}，box_size={heat_info['box_size']}")
+        st.success(f"Recomputation completed. radius={heat_info['radius']}, box_size={heat_info['box_size']}")
         run_params_path = save_params_to_output_dir(
             out_dir=Path(heat_info["out_dir"]),
             input_image_path=image_path,
             params_snapshot=params_snapshot,
             heat_info=heat_info,
         )
-        st.caption(f"参数已保存: {run_params_path.name}")
+        st.caption(f"Parameters saved: {run_params_path.name}")
         if heat_info.get("presence_mode") == "quantile":
             st.caption(
-                f"Presence分位线(%): {heat_info['presence_cuts']} -> 实际阈值: "
+                f"Presence quantiles (%): {heat_info['presence_cuts']} -> effective thresholds: "
                 f"{[round(v, 4) for v in heat_info['presence_thresholds']]}"
             )
         else:
-            st.caption(f"Presence阈值线: {[round(v, 4) for v in heat_info['presence_thresholds']]}")
+            st.caption(f"Presence thresholds: {[round(v, 4) for v in heat_info['presence_thresholds']]}")
 
     if run_batch:
         if not batch_uploaded:
-            st.error("请先在“批量选择图片文件”里选择至少一张图片")
+            st.error("Select at least one image in the batch uploader first.")
             st.stop()
         if not model_path.exists():
-            st.error("模型路径无效")
+            st.error("The model path is invalid.")
             st.stop()
 
         params_snapshot = build_current_params_snapshot(
@@ -1413,7 +2296,7 @@ def app():
         batch_items = []
         failed = []
 
-        with st.spinner(f"正在批量处理 {len(batch_uploaded)} 张图片..."):
+        with st.spinner(f"Processing {len(batch_uploaded)} images..."):
             for idx, one in enumerate(batch_uploaded, start=1):
                 try:
                     image_path, case_id, original_name, output_folder = save_uploaded_file(one)
@@ -1422,9 +2305,9 @@ def app():
                     original_for_size = imread_unicode(image_path, cv2.IMREAD_COLOR)
                     if original_for_size is not None:
                         h, w = original_for_size.shape[:2]
-                        image_size_text = f"{w}×{h} 像素"
+                        image_size_text = f"{w} x {h} pixels"
                     else:
-                        image_size_text = "读取失败"
+                        image_size_text = "Read failed"
 
                     run_full_pipeline(image_path, case_id, output_folder, original_name, model_path, device)
                     heat_info = run_heatmap_and_worst(
@@ -1470,32 +2353,38 @@ def app():
         st.session_state["batch_id"] = batch_id
 
         if batch_items:
-            st.success(f"批量完成：成功 {len(batch_items)} 张，失败 {len(failed)} 张")
-            st.caption(f"批次目录: web_demo_output/{batch_id}")
+            st.success(f"Batch completed: {len(batch_items)} succeeded, {len(failed)} failed.")
+            st.caption(f"Batch directory: web_demo_output/{batch_id}")
         else:
-            st.error("批量处理失败，未生成可用结果。")
+            st.error("Batch processing failed; no usable results were generated.")
         if failed:
-            st.warning("部分图片处理失败：")
+            st.warning("Some images failed:")
             st.code("\n".join(failed), language="text")
 
     batch_records = st.session_state.get("batch_records", [])
     if batch_records:
-        st.subheader("批量结果浏览")
-        st.caption(f"当前批次目录: web_demo_output/{st.session_state.get('batch_id')}")
+        st.subheader("Batch Results")
+        st.caption(f"Current batch directory: web_demo_output/{st.session_state.get('batch_id')}")
         options = [f"{x['index']:02d}. {x['original_name']}" for x in batch_records]
-        selected = st.selectbox("点击选择图片查看结果", options=options, key="batch_viewer_select")
+        selected = st.selectbox("Select an image to view its results", options=options, key="batch_viewer_select")
         sel_idx = options.index(selected)
         sel_item = batch_records[sel_idx]
-        render_case_results(
+        render_analysis_overview(
             case_id=sel_item["case_id"],
             output_folder=sel_item["output_folder"],
+            display_settings=display_settings,
             image_size_text=sel_item.get("image_size_text"),
         )
 
     if st.session_state["case_id"] is not None and not st.session_state.get("batch_records"):
         case_id = st.session_state["case_id"]
         output_folder = st.session_state.get("output_folder") or case_id
-        render_case_results(case_id, output_folder, st.session_state.get("image_size_text"))
+        render_analysis_overview(
+            case_id,
+            output_folder,
+            display_settings,
+            st.session_state.get("image_size_text"),
+        )
 
 
 if __name__ == "__main__":

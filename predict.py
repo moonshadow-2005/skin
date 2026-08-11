@@ -574,14 +574,15 @@ def generate_sector_analysis_image(img, orientations, sector_mask, sector_info, 
     
     print(f"扇区{sector_index}专门分析图已直接保存至: {output_path}")
 
-def analyze_texture_orientation(image_path):
+def analyze_texture_orientation(image_path, include_sector_analysis=True):
     output_dir = 'predict_output'
     os.makedirs(output_dir, exist_ok=True)
     
     # 提取编号并设置为全局变量
     parts = os.path.basename(image_path).split('_')
     num = parts[-1].split('.')[0]
-    plot_radial_sectors.current_num = num  # 修改：设置到plot_radial_sectors函数
+    if include_sector_analysis:
+        plot_radial_sectors.current_num = num
     
     img = imread_unicode(image_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
@@ -626,11 +627,11 @@ def analyze_texture_orientation(image_path):
     # === 整图方向可视化 ===
     plt.figure(figsize=(12, 6))
     plt.subplot(1, 2, 1)
-    plt.title("原始纹理图")
+    plt.title("Texture Image")
     plt.imshow(img, cmap='gray')
 
     plt.subplot(1, 2, 2)
-    plt.title("纹理方向图")
+    plt.title("Pixel-Level Texture-Axis Map")
     step = 20
     valid_points = mask[::step, ::step] > 0
     Y, X = np.where(valid_points)
@@ -648,7 +649,7 @@ def analyze_texture_orientation(image_path):
               color='yellow', scale=1, scale_units='xy', 
               angles='xy', width=0.01, headwidth=8, headlength=10)
     plt.text(center_x + 20, center_y + 20, 
-             f"主方向: {dominant_angle:.1f}°", 
+             f"Dominant texture axis: {dominant_angle:.1f} deg",
              color='yellow', fontsize=12, 
              bbox=dict(facecolor='black', alpha=0.5))
     plt.imshow(img, cmap='gray', alpha=0.3)
@@ -659,12 +660,7 @@ def analyze_texture_orientation(image_path):
     plt.close()
     print(f"整图纹理方向图已保存至: {output_path}")
 
-    # === 空间扇形区域方向分析 + 密集程度分析 ===
-    max_density_index, max_density_info, densest_mask, densest_center, densest_bbox = plot_radial_sectors(
-        img, orientations, mask, output_dir
-    )
-
-    # === 生成单独方向图（主箭头来自最密集扇区）===
+    # === 生成局部方向叠加图 ===
     plt.figure(figsize=(8, 8), facecolor='none')  # 透明背景
     plt.axis('off')
 
@@ -713,6 +709,16 @@ def analyze_texture_orientation(image_path):
     encoded.tofile(orientation_local_path)
     print(f"局部纹理走向图已保存至: {orientation_local_path}")
     plt.close()
+
+    if not include_sector_analysis:
+        print("已跳过8扇区分析")
+        print(f"\n=== 分析完成 ===")
+        return
+
+    # === 空间扇形区域方向分析 + 密集程度分析 ===
+    max_density_index, max_density_info, densest_mask, densest_center, densest_bbox = plot_radial_sectors(
+        img, orientations, mask, output_dir
+    )
 
     # 使用最密集扇区主方向（连续角度，不做8方向量化）。
     arrow_direction_deg = float(max_density_info.get('main_direction_deg', max_density_info.get('outward_direction_deg', 0.0)))
