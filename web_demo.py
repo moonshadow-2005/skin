@@ -506,8 +506,13 @@ def sanitize_name(name: str) -> str:
     return cleaned or "uploaded_image"
 
 
-def imread_unicode(image_path: Path, flags=cv2.IMREAD_COLOR):
-    data = np.fromfile(str(image_path), dtype=np.uint8)
+def imread_unicode(image_path: Path | None, flags=cv2.IMREAD_COLOR):
+    if image_path is None:
+        return None
+    try:
+        data = np.fromfile(str(image_path), dtype=np.uint8)
+    except (OSError, ValueError):
+        return None
     if data.size == 0:
         return None
     return cv2.imdecode(data, flags)
