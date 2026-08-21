@@ -24,7 +24,14 @@ except ImportError:
         compute_orientations,
         predict_mask,
     )
-from skin import analyze_skin_texture
+from src.texture_extraction import analyze_skin_texture
+from src.project_paths import (
+    DEFAULT_MODEL_NAME,
+    HEATMAP_OUTPUT_DIR,
+    LABELED_DATASET_DIR,
+    TEXTURE_OUTPUT_DIR,
+    resolve_model_path,
+)
 
 
 def scaled_box_size_from_shape(
@@ -63,7 +70,7 @@ def compute_score_map(image_path: Path, model_path: Path, target_class: int, rad
 
     analyze_skin_texture(str(image_path), model_path=str(model_path), device=device)
 
-    texture_path = image_path.parent.parent.parent / "skin_output" / f"only_texture_line_{image_path.stem}.png"
+    texture_path = TEXTURE_OUTPUT_DIR / f"only_texture_line_{image_path.stem}.png"
     tex = cv2.imread(str(texture_path), cv2.IMREAD_GRAYSCALE)
     if tex is None:
         raise FileNotFoundError(f"Texture image not found: {texture_path}")
@@ -649,14 +656,14 @@ def main():
         default=40,
         help="Radius in pixels for the arrow-start local orientation",
     )
-    parser.add_argument("--model", default="best_trans_unet_model_20250614_122913.pth", help="Model checkpoint")
-    parser.add_argument("--output-subdir", default="r40", help="Output folder under heatmap_output/<num>/")
+    parser.add_argument("--model", default=DEFAULT_MODEL_NAME, help="Model checkpoint")
+    parser.add_argument("--output-subdir", default="r40", help="Output folder under runtime/heatmaps/<num>/")
     args = parser.parse_args()
 
     root = PROJECT_ROOT
-    image_path = root / "dataset" / "final_labeled" / f"{args.num}.jpg"
-    model_path = root / args.model
-    out_dir = root / "heatmap_output" / str(args.num) / args.output_subdir
+    image_path = LABELED_DATASET_DIR / f"{args.num}.jpg"
+    model_path = resolve_model_path(args.model)
+    out_dir = HEATMAP_OUTPUT_DIR / str(args.num) / args.output_subdir
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 

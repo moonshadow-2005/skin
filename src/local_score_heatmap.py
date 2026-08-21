@@ -12,8 +12,15 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from Unet import UNet
-from skin import analyze_skin_texture
+from src.unet import UNet
+from src.texture_extraction import analyze_skin_texture
+from src.project_paths import (
+    DEFAULT_MODEL_NAME,
+    HEATMAP_OUTPUT_DIR,
+    LABELED_DATASET_DIR,
+    TEXTURE_OUTPUT_DIR,
+    resolve_model_path,
+)
 
 
 def imread_unicode(image_path: str, flags=cv2.IMREAD_COLOR):
@@ -281,17 +288,17 @@ def build_presence_map(
 
 def run_for_id(
     num: str,
-    model_path: str = "best_trans_unet_model_20250614_122913.pth",
+    model_path: str = DEFAULT_MODEL_NAME,
     target_class: int = 1,
     fixed_radius: int | None = None,
     output_subdir: str | None = None,
 ) -> None:
     root = PROJECT_ROOT
-    image_path = root / "dataset" / "final_labeled" / f"{num}.jpg"
+    image_path = LABELED_DATASET_DIR / f"{num}.jpg"
     if not image_path.exists():
         raise FileNotFoundError(f"Image not found: {image_path}")
 
-    out_dir = root / "heatmap_output" / str(num)
+    out_dir = HEATMAP_OUTPUT_DIR / str(num)
     if output_subdir:
         out_dir = out_dir / output_subdir
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -300,7 +307,8 @@ def run_for_id(
     print(f"Device: {device}")
     print(f"Image: {image_path}")
 
-    pred = predict_mask(str(image_path), str(root / model_path), device)
+    resolved_model = resolve_model_path(model_path)
+    pred = predict_mask(str(image_path), str(resolved_model), device)
     raw_region_mask = (pred == target_class).astype(np.uint8)
 
     # For class-1, use the same post-processed effective area as skin.py.
@@ -313,8 +321,8 @@ def run_for_id(
         raise RuntimeError(f"Target class region is empty for this image: class={target_class}")
 
     # Ensure texture line image exists and is up-to-date for this image.
-    analyze_skin_texture(str(image_path), model_path=str(root / model_path), device=device)
-    texture_path = root / "skin_output" / f"only_texture_line_{num}.png"
+    analyze_skin_texture(str(image_path), model_path=str(resolved_model), device=device)
+    texture_path = TEXTURE_OUTPUT_DIR / f"only_texture_line_{num}.png"
     tex = imread_unicode(str(texture_path), cv2.IMREAD_GRAYSCALE)
     if tex is None:
         raise FileNotFoundError(f"Texture image not found: {texture_path}")
@@ -436,10 +444,10 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Per-pixel local scoring heatmap in selected class region")
     parser.add_argument("num", help="Image id, e.g. 66")
-    parser.add_argument("--model", default="best_trans_unet_model_20250614_122913.pth", help="Model checkpoint file name")
+    parser.add_argument("--model", default=DEFAULT_MODEL_NAME, help="Model checkpoint file name or path")
     parser.add_argument("--target-class", type=int, default=1, choices=[1, 2], help="Target region class label (1 or 2)")
     parser.add_argument("--radius", type=int, default=None, help="Fixed local radius in pixels; if omitted use dynamic radius")
-    parser.add_argument("--output-subdir", default=None, help="Output subdirectory under heatmap_output/<num>/")
+    parser.add_argument("--output-subdir", default=None, help="Output subdirectory under runtime/heatmaps/<num>/")
     args = parser.parse_args()
 
     run_for_id(

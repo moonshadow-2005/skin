@@ -20,8 +20,8 @@ import streamlit as st
 import torch
 import matplotlib.cm as cm
 
-from skin import analyze_skin_texture
-from predict import analyze_texture_orientation
+from src.texture_extraction import analyze_skin_texture
+from src.orientation_analysis import analyze_texture_orientation
 from src.local_score_heatmap import (
     build_disk_kernel,
     build_effective_texture_region_mask,
@@ -39,15 +39,23 @@ from src.worst_box_direction import (
     scaled_box_size_from_shape,
 )
 import src.worst_box_direction as worst_box_direction_module
+from src.project_paths import (
+    DEFAULT_MODEL_NAME,
+    DISPLAY_SETTINGS_PATH,
+    ORIENTATION_OUTPUT_DIR,
+    PROJECT_ROOT,
+    TEXTURE_OUTPUT_DIR,
+    WEB_INPUT_DIR,
+    WEB_OUTPUT_DIR,
+    resolve_model_path,
+)
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-INPUT_DIR = PROJECT_ROOT / "web_demo_inputs"
-OUTPUT_DIR = PROJECT_ROOT / "web_demo_output"
-DISPLAY_SETTINGS_PATH = PROJECT_ROOT / "web_demo_display_settings.json"
+INPUT_DIR = WEB_INPUT_DIR
+OUTPUT_DIR = WEB_OUTPUT_DIR
 
 PARAM_DEFAULTS = {
-    "model_rel": "best_trans_unet_model_20250614_122913.pth",
+    "model_rel": f"models/{DEFAULT_MODEL_NAME}",
     "target_class": 1,
     "radius_mode": "Dynamic",
     "fixed_radius": 40,
@@ -205,6 +213,7 @@ def load_display_settings() -> dict:
 
 def save_display_settings(settings: dict) -> None:
     normalized = normalize_display_settings(settings)
+    DISPLAY_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = DISPLAY_SETTINGS_PATH.with_suffix(".json.tmp")
     temporary_path.write_text(
         json.dumps(normalized, ensure_ascii=True, indent=2) + "\n",
@@ -582,7 +591,7 @@ def resolve_predict_output(case_id: str, prefix: str) -> Path:
     predict.py currently derives output suffix from the last underscore-separated token,
     so uploaded IDs like web_abcd may produce files named with suffix abcd only.
     """
-    predict_dir = PROJECT_ROOT / "predict_output"
+    predict_dir = ORIENTATION_OUTPUT_DIR
     suffix = case_id.split("_")[-1]
     exact = predict_dir / f"{prefix}{case_id}.png"
     fallback = predict_dir / f"{prefix}{suffix}.png"
@@ -945,7 +954,7 @@ def run_heatmap_and_worst(
     out_dir.mkdir(parents=True, exist_ok=True)
     original_copy = copy_original_to_output(image_path, out_dir, original_name)
 
-    texture_path = PROJECT_ROOT / "skin_output" / f"only_texture_line_{case_id}.png"
+    texture_path = TEXTURE_OUTPUT_DIR / f"only_texture_line_{case_id}.png"
     if not texture_path.exists():
         raise FileNotFoundError("Run the full pipeline first; the texture image has not been generated.")
 
@@ -1105,7 +1114,7 @@ def run_full_pipeline(
     cv2.imwrite(str(out_dir / "segmentation_overlay.png"), cv2.cvtColor(seg_overlay, cv2.COLOR_RGB2BGR))
 
     analyze_skin_texture(str(image_path), model_path=str(model_path), device=device)
-    texture_path = PROJECT_ROOT / "skin_output" / f"only_texture_line_{case_id}.png"
+    texture_path = TEXTURE_OUTPUT_DIR / f"only_texture_line_{case_id}.png"
     if not texture_path.exists():
         raise FileNotFoundError(f"Texture image was not generated: {texture_path}")
 
@@ -1120,7 +1129,7 @@ def run_full_pipeline(
         "out_dir": out_dir,
         "original_copy": original_copy,
         "texture_only": texture_path,
-        "texture_compare": PROJECT_ROOT / "skin_output" / f"texture_overlay_{case_id}.png",
+        "texture_compare": TEXTURE_OUTPUT_DIR / f"texture_overlay_{case_id}.png",
         "orientation_local": orientation_local,
         "orientation_full": orientation_full,
         "texture_direction_overlay": texture_direction_overlay,
@@ -1150,8 +1159,8 @@ def latest_result_file(out_dir: Path, pattern: str) -> Path | None:
 
 
 def resolve_texture_overlay(case_id: str, output_folder: str | None = None) -> Path:
-    overlay_path = PROJECT_ROOT / "skin_output" / f"texture_overlay_{case_id}.png"
-    texture_path = PROJECT_ROOT / "skin_output" / f"only_texture_line_{case_id}.png"
+    overlay_path = TEXTURE_OUTPUT_DIR / f"texture_overlay_{case_id}.png"
+    texture_path = TEXTURE_OUTPUT_DIR / f"only_texture_line_{case_id}.png"
     out_dir = OUTPUT_DIR / output_folder if output_folder else None
     original_path = latest_result_file(out_dir, "00_original__*") if out_dir is not None else None
     if original_path is None:
@@ -1187,7 +1196,7 @@ def resolve_texture_overlay(case_id: str, output_folder: str | None = None) -> P
 
     if overlay_path.exists():
         return overlay_path
-    comparison_path = PROJECT_ROOT / "skin_output" / f"texture_line_{case_id}.png"
+    comparison_path = TEXTURE_OUTPUT_DIR / f"texture_line_{case_id}.png"
     return comparison_path if comparison_path.exists() else overlay_path
 
 
@@ -1196,7 +1205,7 @@ def case_result_images(case_id: str, output_folder: str) -> dict[str, tuple[Path
     try:
         orientation_full = resolve_predict_output(case_id, "orientation_texture_line_")
     except Exception:
-        orientation_full = PROJECT_ROOT / "predict_output" / f"orientation_texture_line_{case_id}.png"
+        orientation_full = ORIENTATION_OUTPUT_DIR / f"orientation_texture_line_{case_id}.png"
 
     return {
         "original_image": (
@@ -1215,7 +1224,7 @@ def case_result_images(case_id: str, output_folder: str) -> dict[str, tuple[Path
             "Filled normal-skin, intertidal-zone, and keloid-body classes.",
         ),
         "texture_lines": (
-            PROJECT_ROOT / "skin_output" / f"only_texture_line_{case_id}.png",
+            TEXTURE_OUTPUT_DIR / f"only_texture_line_{case_id}.png",
             "Texture Lines",
             "Extracted texture-line signal used by subsequent calculations.",
         ),
@@ -1323,7 +1332,7 @@ def render_analysis_overview(
     st.subheader("Analysis Results")
     if image_size_text:
         st.caption(f"Input image size: {image_size_text}")
-    st.caption(f"Output directory: web_demo_output/{output_folder}")
+    st.caption(f"Output directory: runtime/web_outputs/{output_folder}")
 
     images = case_result_images(case_id, output_folder)
     direction_result_key = selected_direction_result_key(display_settings)
@@ -1599,7 +1608,7 @@ def render_process_overview(
 ) -> None:
     st.subheader("Process Overview")
     details = f"Input: {image_size_text} · " if image_size_text else ""
-    st.caption(f"{details}Output: web_demo_output/{output_folder} · Visibility follows Display Settings")
+    st.caption(f"{details}Output: runtime/web_outputs/{output_folder} · Visibility follows Display Settings")
     overview = compose_process_overview(case_id, output_folder, display_settings)
     st.image(overview, width="stretch")
 
@@ -1613,7 +1622,7 @@ def render_case_results(
     out_dir = OUTPUT_DIR / output_folder
     if image_size_text:
         st.caption(f"Input image size: {image_size_text}")
-    st.caption(f"Output directory: web_demo_output/{output_folder}")
+    st.caption(f"Output directory: runtime/web_outputs/{output_folder}")
 
     intermediate_keys = (
         "original_image",
@@ -1633,21 +1642,21 @@ def render_case_results(
             show_image_with_explain(
                 copied_original[-1],
                 "Original Image (Output Copy)",
-                "A copy of the uploaded image stored in web_demo_output for review and result comparison.",
+                "A copy of the uploaded image stored in runtime/web_outputs for review and result comparison.",
             )
     if display_enabled(display_settings, "images", "segmentation_overlay"):
         show_image_with_explain(out_dir / "segmentation_overlay.png", "Three-Class Segmentation Overlay", "Overlays normal skin, intertidal zone, and keloid body boundaries on the original image.")
     if display_enabled(display_settings, "images", "segmentation_filled"):
         show_image_with_explain(out_dir / "segmentation_filled.png", "Three-Class Segmentation", "Fills normal skin, intertidal zone, and keloid body with distinct colors.")
     if display_enabled(display_settings, "images", "texture_lines"):
-        show_image_with_explain(PROJECT_ROOT / "skin_output" / f"only_texture_line_{case_id}.png", "Texture Lines", "Contains only the extracted texture-line signal used for orientation analysis and local scoring.")
+        show_image_with_explain(TEXTURE_OUTPUT_DIR / f"only_texture_line_{case_id}.png", "Texture Lines", "Contains only the extracted texture-line signal used for orientation analysis and local scoring.")
     if display_enabled(display_settings, "images", "texture_comparison"):
         show_image_with_explain(resolve_texture_overlay(case_id, output_folder), "Texture Line Overlay", "Overlays the extracted texture lines on the original image.")
     if display_enabled(display_settings, "images", "pixel_texture_axis_map"):
         try:
             orientation_full_show = resolve_predict_output(case_id, "orientation_texture_line_")
         except Exception:
-            orientation_full_show = PROJECT_ROOT / "predict_output" / f"orientation_texture_line_{case_id}.png"
+            orientation_full_show = ORIENTATION_OUTPUT_DIR / f"orientation_texture_line_{case_id}.png"
         show_image_with_explain(orientation_full_show, "Pixel-Level Texture-Axis Map", "Shows structure-tensor texture axes in the image context.")
     if display_enabled(display_settings, "images", "texture_axis_overlay"):
         show_image_with_explain(
@@ -1806,7 +1815,7 @@ def app():
         )
     else:
         model_rel = str(st.session_state["p_model_rel"])
-    model_path = (PROJECT_ROOT / model_rel).resolve()
+    model_path = resolve_model_path(model_rel)
     if not model_path.exists():
         st.sidebar.error("The model file does not exist. Enable Model File in Display Settings to change it.")
 
@@ -2126,7 +2135,7 @@ def app():
     if st.session_state["case_id"] is not None:
         st.info(f"Current case ID: {st.session_state['case_id']}")
         st.caption(f"Input image size: {st.session_state['image_size_text']}")
-        st.caption(f"Output directory: web_demo_output/{st.session_state['output_folder']}")
+        st.caption(f"Output directory: runtime/web_outputs/{st.session_state['output_folder']}")
 
     if run_all:
         if st.session_state["image_path"] is None:
@@ -2359,7 +2368,7 @@ def app():
 
         if batch_items:
             st.success(f"Batch completed: {len(batch_items)} succeeded, {len(failed)} failed.")
-            st.caption(f"Batch directory: web_demo_output/{batch_id}")
+            st.caption(f"Batch directory: runtime/web_outputs/{batch_id}")
         else:
             st.error("Batch processing failed; no usable results were generated.")
         if failed:
@@ -2369,7 +2378,7 @@ def app():
     batch_records = st.session_state.get("batch_records", [])
     if batch_records:
         st.subheader("Batch Results")
-        st.caption(f"Current batch directory: web_demo_output/{st.session_state.get('batch_id')}")
+        st.caption(f"Current batch directory: runtime/web_outputs/{st.session_state.get('batch_id')}")
         options = [f"{x['index']:02d}. {x['original_name']}" for x in batch_records]
         selected = st.selectbox("Select an image to view its results", options=options, key="batch_viewer_select")
         sel_idx = options.index(selected)

@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import sys
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.project_paths import FINAL_RESULTS_DIR, RESULTS_DIR
 
 import cv2
 import numpy as np
@@ -132,16 +139,18 @@ def process_one_case(case_dir: Path, output_root: Path) -> tuple[str, list[str],
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Batch convert results/* to final_results/* with simplified PNG outputs")
+    parser = argparse.ArgumentParser(
+        description="Convert runtime/results/* to simplified runtime/final_results/* outputs"
+    )
     parser.add_argument(
         "--results-root",
-        default="results",
-        help="Source root directory, default: results",
+        default=str(RESULTS_DIR),
+        help="Source root directory, default: runtime/results",
     )
     parser.add_argument(
         "--output-root",
-        default="final_results",
-        help="Target root directory, default: final_results",
+        default=str(FINAL_RESULTS_DIR),
+        help="Target root directory, default: runtime/final_results",
     )
     parser.add_argument(
         "--cases",

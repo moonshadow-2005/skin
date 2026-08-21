@@ -26,6 +26,7 @@ Thumbs.db
 *.pt
 
 # Generated outputs
+runtime/
 skin_output/
 predict_output/
 final_output/

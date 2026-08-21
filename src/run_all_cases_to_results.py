@@ -13,20 +13,21 @@ try:
     from .run_case_to_results import run_case
 except ImportError:
     from src.run_case_to_results import run_case
+from src.project_paths import DEFAULT_MODEL_NAME, FINAL_RESULTS_DIR, LABELED_DATASET_DIR, RESULTS_DIR
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Batch run all dataset/final_labeled images to results/<id> and final_results/<id>"
+        description="Batch run dataset images to runtime/results/<id> and runtime/final_results/<id>"
     )
     parser.add_argument(
         "--data-dir",
-        default="dataset/final_labeled",
+        default=str(LABELED_DATASET_DIR),
         help="Input image directory",
     )
     parser.add_argument(
         "--model",
-        default="best_trans_unet_model_20250614_122913.pth",
+        default=DEFAULT_MODEL_NAME,
         help="Model checkpoint",
     )
     parser.add_argument(
@@ -44,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-existing",
         action="store_true",
-        help="Skip cases that already have final_results/<id>/08_presence_overlay.png",
+        help="Skip cases that already have runtime/final_results/<id>/08_presence_overlay.png",
     )
     parser.add_argument(
         "--only-cases",
@@ -58,7 +59,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     root = PROJECT_ROOT
-    data_dir = (root / args.data_dir).resolve()
+    raw_data_dir = Path(args.data_dir)
+    data_dir = raw_data_dir.resolve() if raw_data_dir.is_absolute() else (root / raw_data_dir).resolve()
 
     if not data_dir.exists():
         raise FileNotFoundError(f"数据目录不存在: {data_dir}")
@@ -82,7 +84,7 @@ def main() -> None:
     print(f"模型: {args.model}")
 
     for idx, case_id in enumerate(case_ids, start=1):
-        final_flag = root / "final_results" / case_id / "08_presence_overlay.png"
+        final_flag = FINAL_RESULTS_DIR / case_id / "08_presence_overlay.png"
         if args.skip_existing and final_flag.exists():
             skipped += 1
             print(f"[{idx}/{total}] 跳过 {case_id} (已存在 {final_flag.name})")
@@ -109,7 +111,8 @@ def main() -> None:
     print(f"失败: {len(failed)}")
 
     if failed:
-        fail_log = root / "results" / "batch_run_case_failures.txt"
+        fail_log = RESULTS_DIR / "batch_run_case_failures.txt"
+        fail_log.parent.mkdir(parents=True, exist_ok=True)
         with fail_log.open("w", encoding="utf-8") as f:
             for case_id, err in failed:
                 f.write(f"{case_id}\t{err}\n")

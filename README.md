@@ -1,278 +1,154 @@
-# 皮肤纹理方向分析系统
+# KeTAS 皮肤纹理分析项目
 
-一个基于深度学习与计算机视觉的皮肤纹理方向分析工具，支持从单病例到全量批处理，自动生成分割、纹理、方向、严重度与报告结果。
+本项目使用语义分割、Gabor 纹理提取与结构张量方向估计，对皮肤图像生成三类主要结果：
 
-## 快速开始（运行方法）
+- **Severity Map Overlay**：局部严重程度叠加图
+- **Presence Level Overlay**：纹理存在等级叠加图
+- **Direction Map**：区域平均方向图与局部方向图
 
-### 1) 安装依赖
+当前推荐入口是 Streamlit Demo。历史批处理和报告脚本仍保留在 `src/` 与 `scripts/legacy/`，但不再与模型、文档和运行产物混放在项目根目录。
+
+## 快速开始
+
+建议在项目根目录执行：
 
 ```bash
 pip install -r requirements.txt
-```
-
-### 2) 网页 Demo（上传 + 调参 + 重算）
-
-```bash
 streamlit run web_demo.py
 ```
 
-### 3) 单病例完整流程（推荐）
-
-```bash
-python src/run_case_to_results.py 66
-```
-
-### 4) 全量批处理（推荐）
-
-```bash
-python src/run_all_cases_to_results.py --skip-existing
-```
-
-### 5) 单图全流程（路径或病例ID）
-
-```bash
-python src/run_one_full_pipeline.py 66
-```
-
-或：
-
-```bash
-python src/run_one_full_pipeline.py dataset/final_labeled/66.jpg
-```
-
-## 项目概述
-
-当前流程包含以下阶段：
-
-1. 皮肤分割：使用 U-Net 三分类分割（默认使用 Trans-UNet 权重）
-2. 纹理提取：在目标区域内提取纹理线条
-3. 方向分析：结构张量 + 8 扇区统计（密度、一致性、综合分数）
-4. 局部严重度：像素级局部评分，输出 severity_map 与 presence_map
-5. 最严重框分析：在有效区域内筛选最严重框并计算框内主方向
-6. 报告与汇总：输出标准化目录 results 和精简目录 final_results
-
-## 项目结构（已更新）
+默认模型为：
 
 ```text
-best_unet_model/
-├── dataset/
-│   ├── final_labeled/                     # 主数据集，默认输入目录（{id}.jpg）
-│   └── 入选动态图/                          # 支持中文路径的样例目录
-├── best_unet_model.pth                    # 旧 U-Net 权重
-├── best_trans_unet_model_20250614_122913.pth  # 当前默认模型权重
-├── main.py                                # 传统单例主流程入口
-├── Unet.py                                # U-Net 模型定义/训练脚本
-├── skin.py                                # 纹理提取模块
-├── predict.py                             # 方向与扇区分析模块
-├── report.py                              # 报告生成模块
-├── test.py                                # 单图分割可视化（含 line-only 叠加）
-├── web_demo.py                            # Streamlit 网页 Demo（上传、全流程中间结果、参数调节重算）
-├── src/
-│   ├── run_all_overlays.py                # 批量分割可视化到 results/<id>/01_segmentation
-│   ├── run_one_full_pipeline.py           # 单图全流程（支持中文路径）
-│   ├── local_score_heatmap.py             # severity/presence 局部评分输出
-│   ├── worst_box_direction.py             # 最严重框与框内方向分析
-│   ├── build_final_results.py             # results -> final_results 精简映射
-│   ├── run_case_to_results.py             # 单病例一键生成完整目录 + 精简目录
-│   └── run_all_cases_to_results.py        # 全量批处理入口（支持断点跳过）
-├── run_all_overlays.py                    # 兼容入口（转调 src）
-├── run_one_full_pipeline.py               # 兼容入口（转调 src）
-├── local_score_heatmap.py                 # 兼容入口（转调 src）
-├── worst_box_direction.py                 # 兼容入口（转调 src）
-├── build_final_results.py                 # 兼容入口（转调 src）
-├── run_case_to_results.py                 # 兼容入口（转调 src）
-├── run_all_cases_to_results.py            # 兼容入口（转调 src）
-├── skin_output/                           # 中间输出：纹理图
-├── predict_output/                        # 中间输出：方向图、扇区数据
-├── final_output/                          # 中间输出：最终叠加图
-├── heatmap_output/                        # 中间输出：severity/presence/worst 框
-├── report/                                # 中间输出：分析报告
-├── results/                               # 标准完整结果目录（按病例）
-│   └── <id>/
-│       ├── 01_segmentation/
-│       ├── 02_texture/
-│       ├── 03_orientation/
-│       ├── 04_final_overlay/
-│       ├── 05_report/
-│       ├── 06_heatmap_r40/
-│       └── 07_worst_boxes/
-└── final_results/                         # 精简交付目录（按病例）
-    └── <id>/
-        ├── 01_segment.png
-        ├── 02_texture.png
-        ├── 03_orientation.png
-        ├── 04_orientation_overlay.png
-        ├── 05_sector_details/
-        ├── 06_severity.png
-        ├── 07_worst.png
-        └── 08_presence_overlay.png
+models/best_trans_unet_model_20250614_122913.pth
 ```
 
-## 核心脚本说明
+Demo 的显示设置保存在 `runtime/config/web_demo_display_settings.json`，重启后仍然有效。
 
-### 1) 分析主链路
+## 目录结构
 
-- main.py
-  - 传统入口，执行 skin -> predict -> final -> report
-- src/run_case_to_results.py
-  - 推荐单病例入口，统一输出到 results/<id> 与 final_results/<id>
-- src/run_all_cases_to_results.py
-  - 推荐全量入口，批量遍历 dataset/final_labeled/*.jpg
+```text
+skin/
+├── web_demo.py                 # Streamlit 主入口
+├── requirements.txt
+├── README.md
+├── src/                        # 可复用算法模块与命令行工具
+│   ├── project_paths.py        # 全项目统一路径定义
+│   ├── unet.py                 # U-Net / TransUNet 模型与训练代码
+│   ├── texture_extraction.py   # 分割与纹理线提取
+│   ├── orientation_analysis.py # 结构张量与方向分析
+│   ├── local_score_heatmap.py  # Severity / Presence 计算
+│   ├── worst_box_direction.py  # Presence 区域及方向箭头
+│   └── ...
+├── scripts/
+│   └── legacy/                 # 兼容旧流程的入口
+├── models/                     # 模型权重，不提交 Git
+├── dataset/                    # 原始数据，不提交 Git
+├── docs/
+│   ├── paper/                  # 论文、翻译与订正记录
+│   ├── project/                # 项目原理与面试问答
+│   └── notes/                  # 独立技术笔记
+└── runtime/                    # 所有可再生成的运行产物，不提交 Git
+    ├── config/
+    ├── texture/
+    ├── orientation/
+    ├── heatmaps/
+    ├── web_inputs/
+    ├── web_outputs/
+    ├── reports/
+    ├── results/
+    └── final_results/
+```
 
-### 2) 局部严重度与最严重框
+所有内部路径均由 `src/project_paths.py` 根据该文件位置推导，不依赖启动命令所在的当前工作目录。模型参数既可传绝对路径，也可传项目相对路径或 `models/` 中的文件名。
 
-- src/local_score_heatmap.py
-  - 输出：
-    - <id>_severity_map.png
-    - <id>_severity_overlay.png
-    - <id>_presence_map.png
-    - <id>_presence_overlay.png
-    - <id>_top10_points.txt
-  - 说明：
-    - class1 默认使用 effective mask（close -> dilate -> erode）
-    - presence_map 采用 effective mask 内四分位分级配色（蓝 -> 青 -> 黄 -> 红）
-- src/worst_box_direction.py
-  - 在有效区域内选择最严重框（支持 1~5 个不重叠框）
-  - 支持半径和框大小按图像尺度自动缩放（也可手动指定）
-  - 箭头方向约束：相对瘢痕主体外接矩形中心 A 与框中心 B，最终方向与 A->B 不成钝角
+## 核心流程
 
-### 3) 精简目录构建
+1. **Segmentation**：U-Net/TransUNet 将图像分为背景、目标皮肤区域及其他类别。
+2. **Texture Extraction**：在有效区域内使用多尺度、多方向 Gabor 响应提取纹理线。
+3. **Direction Analysis**：由图像梯度构造结构张量，估计无向轴方向，并计算方向一致性。
+4. **Severity Analysis**：结合局部纹理密度与方向一致性生成 Severity Map。
+5. **Presence Analysis**：按可调百分位阈值形成闭合连通区域，并按严重程度着色。
+6. **Direction Presentation**：输出区域平均方向和指定局部范围内的方向箭头。
 
-- src/build_final_results.py
-  - 将 results/<id> 关键结果统一转为 PNG 并整理到 final_results/<id>
+Demo 的 Analysis 页面和 Process Overview 页面只展示 Settings 中启用的参数及中间图片。
 
-## 模型与关键规则
+## 命令行工具
 
-- 默认模型：best_trans_unet_model_20250614_122913.pth
-- 方向箭头：使用连续主方向（不做 8 方向量化）
-- severity 命名：已替代旧 heatmap 命名
-
-## 环境要求
+### 单病例归档流程
 
 ```bash
-python >= 3.8
-torch >= 1.8.0
-torchvision >= 0.9.0
-opencv-python >= 4.5.0
-numpy >= 1.19.0
-matplotlib >= 3.3.0
-scikit-learn >= 0.24.0
-Pillow >= 8.0.0
-tqdm >= 4.60.0
-streamlit >= 1.30.0   # 网页 Demo 需要
+python src/run_case_to_results.py 66 \
+  --model models/best_trans_unet_model_20250614_122913.pth
 ```
 
-## 使用方式
+结果写入：
 
-### 1) 单病例完整流程（推荐）
+- `runtime/results/66/`：完整阶段产物
+- `runtime/final_results/66/`：精简结果
 
-```bash
-python src/run_case_to_results.py 66
-```
-
-可选参数：
-
-```bash
-python src/run_case_to_results.py 66 --model best_trans_unet_model_20250614_122913.pth --radius 40 --box-size 80
-```
-
-### 2) 全量批处理（推荐）
+### 批量处理
 
 ```bash
 python src/run_all_cases_to_results.py --skip-existing
 ```
 
-常用参数：
+指定病例：
 
 ```bash
 python src/run_all_cases_to_results.py --only-cases 30 66 100
-python src/run_all_cases_to_results.py --data-dir dataset/final_labeled --radius 40 --box-size 80
 ```
 
-### 3) 仅做局部严重度图
+### 局部严重度
 
 ```bash
-python src/local_score_heatmap.py 66 --target-class 1 --radius 40 --output-subdir r40
+python src/local_score_heatmap.py 66 --target-class 1 --radius 40
 ```
 
-### 4) 仅做最严重框
+输出位于 `runtime/heatmaps/<病例>/<子目录>/`。
+
+### Presence 区域与方向
 
 ```bash
-python src/worst_box_direction.py 66 --radius 40 --box-size 80 --num-boxes 1 --output-subdir r40
+python src/worst_box_direction.py 66 \
+  --radius 40 \
+  --box-size 80 \
+  --area-percentile 80
 ```
 
-支持范围：
-
-- `--num-boxes` 可设置 `1~5`
-
-### 5) 从已有 results 生成精简目录
-
-```bash
-python src/build_final_results.py --cases 66
-```
-
-### 6) 网页 Demo（上传 + 可视化 + 调参重算）
-
-```bash
-streamlit run web_demo.py
-```
-
-能力说明：
-
-- 上传任意图片后，一键生成主要中间结果并展示：分割、纹理、方向、扇区、纹理走向叠加。
-- 可在侧边栏手动调整参数后重复生成：
-  - Heatmap radius（动态/固定）
-  - Presence 分级数与每条分界线（支持 threshold 模式: 0~1，quantile 模式: 0~100 分位）
-  - 纹理阈值、密度/一致性权重、热图叠加透明度
-  - 最严重框大小（动态/固定）、框数量（1~5）、最小覆盖率
-- 支持“仅重算热图/最严重框”，用于快速调参到满意效果。
-- 运行按钮固定在侧边栏，滚动页面时无需回到顶部。
-- `web_demo_output/` 下会按 `原图名__case_id/` 创建目录，并自动保存原图 PNG 副本：`00_original__*.png`。
-
-### 7) 单图全流程（路径或病例ID）
-
-```bash
-python src/run_one_full_pipeline.py 66
-```
-
-或直接传图片路径（支持中文路径）：
+### 单图历史完整流程
 
 ```bash
 python src/run_one_full_pipeline.py dataset/final_labeled/66.jpg
 ```
 
-可选模型参数：
+该入口保留旧报告链路。当前论文和 Demo 已弃用的 8 扇区展示仅可能出现在历史报告工具中，不属于当前 Demo 的最终输出。
 
-```bash
-python src/run_one_full_pipeline.py 66 --model best_trans_unet_model_20250614_122913.pth
-```
+## 路径迁移
 
-## 输出说明
+旧目录名仍保留在 `.gitignore` 中，避免旧版本生成的文件被误提交；新代码只写入下列位置：
 
-### 中间目录
+| 旧位置 | 当前统一位置 |
+| --- | --- |
+| 根目录模型文件 | `models/` |
+| `skin_output/` | `runtime/texture/` |
+| `predict_output/` | `runtime/orientation/` |
+| `heatmap_output/` | `runtime/heatmaps/` |
+| `web_demo_inputs/` | `runtime/web_inputs/` |
+| `web_demo_output/` | `runtime/web_outputs/` |
+| `report/` | `runtime/reports/` |
+| `results/` | `runtime/results/` |
+| `final_results/` | `runtime/final_results/` |
 
-- skin_output/
-  - texture_line_<id>.png
-  - only_texture_line_<id>.png
-- predict_output/
-  - orientation_texture_line_<id>.png
-  - orientation_only_texture_line_<id>.png
-  - spatial_sector_directions_<id>.png
-  - sector_info_<id>.json / .pkl
-- heatmap_output/<id>/<subdir>/
-  - <id>_severity_map.png
-  - <id>_severity_overlay.png
-  - <id>_presence_map.png
-  - <id>_presence_overlay.png
-  - <id>_worst*_box.png / <id>_worst*_direction.png / <id>_worst*_info.txt
+## 文档
 
-### 标准结果目录
+- [项目技术说明](docs/project/PROJECT_TECH_INTRO.md)
+- [项目面试问答](docs/project/项目面试问答.md)
+- [论文方法订正清单](docs/paper/KeTAS_方法订正清单.md)
+- [结构张量中的 Omega(i)](docs/notes/结构张量Omega说明.md)
 
-- results/<id>/01~07：完整链路结果，便于排错和科研分析
-- final_results/<id>/01~08：交付向精简结果，均为可直接查看的图片
+## 注意事项
 
-## 备注
-
-- 输入建议使用 dataset/final_labeled/<id>.jpg。
-- 若批处理失败，src/run_all_cases_to_results.py 会写入 results/batch_run_case_failures.txt。
-- 根目录同名脚本仍可运行，但仅作为兼容入口，内部已统一转调 src。
+- `models/`、`dataset/` 和 `runtime/` 默认不提交 Git。
+- 不要在代码中拼接新的根目录相对路径；新增目录应统一定义在 `src/project_paths.py`。
+- `scripts/legacy/main.py` 是旧 `main.py` 的兼容入口，新功能应放在 `src/` 或 `web_demo.py`。

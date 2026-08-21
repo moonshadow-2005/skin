@@ -8,13 +8,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from test import visualize_prediction
+from src.segmentation_visualization import visualize_prediction
+from src.project_paths import DEFAULT_MODEL_PATH, LABELED_DATASET_DIR, RESULTS_DIR
 
 
 def main() -> None:
     root = PROJECT_ROOT
-    input_dir = root / "dataset" / "final_labeled"
-    results_root = root / "results"
+    input_dir = LABELED_DATASET_DIR
+    results_root = RESULTS_DIR
     results_root.mkdir(parents=True, exist_ok=True)
 
     image_paths = sorted(input_dir.glob("*.jpg"))
@@ -23,7 +24,7 @@ def main() -> None:
         return
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model_path = str(root / "best_trans_unet_model_20250614_122913.pth")
+    model_path = str(DEFAULT_MODEL_PATH)
 
     print(f"Input dir: {input_dir}")
     print(f"Results root: {results_root}")

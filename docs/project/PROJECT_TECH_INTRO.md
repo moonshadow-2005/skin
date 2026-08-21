@@ -124,9 +124,9 @@ Presence 支持两类分级策略：
 
 ### 4.3 结果组织
 输出分层组织，兼顾调试与交付：
-1. 中间产物目录（skin_output, predict_output, heatmap_output 等）
-2. 标准结果目录 results/<id>
-3. 精简交付目录 final_results/<id>
+1. 中间产物目录（`runtime/texture`、`runtime/orientation`、`runtime/heatmaps` 等）
+2. 标准结果目录 `runtime/results/<id>`
+3. 精简交付目录 `runtime/final_results/<id>`
 
 ---
 

@@ -10,9 +10,18 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from skin import analyze_skin_texture
-from predict import analyze_texture_orientation
-from report import generate_report
+from src.texture_extraction import analyze_skin_texture
+from src.orientation_analysis import analyze_texture_orientation
+from src.legacy_report import generate_report
+from src.project_paths import (
+    DEFAULT_MODEL_NAME,
+    FINAL_OVERLAY_DIR,
+    LABELED_DATASET_DIR,
+    ORIENTATION_OUTPUT_DIR,
+    REPORT_OUTPUT_DIR,
+    TEXTURE_OUTPUT_DIR,
+    resolve_model_path,
+)
 
 
 def imread_unicode(image_path: str, flags=cv2.IMREAD_COLOR):
@@ -68,7 +77,7 @@ def resolve_input_image(root: Path, image_or_id: str | None) -> Path:
     2) dataset/final_labeled/<id>.(jpg|png|jpeg)
     3) First jpg under dataset/final_labeled when not provided
     """
-    data_dir = root / "dataset" / "final_labeled"
+    data_dir = LABELED_DATASET_DIR
 
     if image_or_id is None:
         candidates = sorted(data_dir.glob("*.jpg"))
@@ -97,7 +106,7 @@ def resolve_input_image(root: Path, image_or_id: str | None) -> Path:
 
 def resolve_orientation_output(root: Path, case_id: str) -> Path:
     """predict.py may use last token after underscore as output suffix; support both."""
-    predict_dir = root / "predict_output"
+    predict_dir = ORIENTATION_OUTPUT_DIR
     suffix = case_id.split("_")[-1]
 
     exact = predict_dir / f"orientation_only_texture_line_{case_id}.png"
@@ -125,8 +134,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        default="best_trans_unet_model_20250614_122913.pth",
-        help="Model checkpoint relative to project root",
+        default=DEFAULT_MODEL_NAME,
+        help="Model checkpoint name, project-relative path, or absolute path",
     )
     return parser.parse_args()
 
@@ -135,6 +144,7 @@ def main() -> None:
     args = parse_args()
     root = PROJECT_ROOT
     image_path = resolve_input_image(root, args.image_or_id)
+    model_path = resolve_model_path(args.model)
 
     num = image_path.stem
 
@@ -145,28 +155,27 @@ def main() -> None:
     print(f"使用设备: {device}")
 
     # 1) 纹理提取
-    analyze_skin_texture(str(image_path), model_path=args.model, device=device)
+    analyze_skin_texture(str(image_path), model_path=model_path, device=device)
 
     # 2) 方向分析
-    texture_input = root / "skin_output" / f"only_texture_line_{num}.png"
+    texture_input = TEXTURE_OUTPUT_DIR / f"only_texture_line_{num}.png"
     if not texture_input.exists():
         raise FileNotFoundError(f"未找到纹理线条图: {texture_input}")
     analyze_texture_orientation(str(texture_input))
 
     # 3) 最终叠加图
     direction_only = resolve_orientation_output(root, num)
-    final_output = root / "final_output" / f"final_result_{num}.jpg"
+    final_output = FINAL_OVERLAY_DIR / f"final_result_{num}.jpg"
     overlay_images_unicode(str(image_path), str(direction_only), str(final_output))
 
     # 4) 报告生成
     generate_report(num)
 
     print("\n=== 全流程完成 ===")
-    print(f"纹理图: skin_output/only_texture_line_{num}.png")
-    print(f"方向图: predict_output/orientation_only_texture_line_{num}.png")
-    print(f"扇区图: predict_output/spatial_sector_directions_{num}.png")
-    print(f"叠加图: final_output/final_result_{num}.jpg")
-    print(f"报告: report/{num}_skin_texture_analysis_report.md")
+    print(f"纹理图: {TEXTURE_OUTPUT_DIR / f'only_texture_line_{num}.png'}")
+    print(f"方向图: {ORIENTATION_OUTPUT_DIR / f'orientation_only_texture_line_{num}.png'}")
+    print(f"叠加图: {final_output}")
+    print(f"报告: {REPORT_OUTPUT_DIR / f'{num}_skin_texture_analysis_report.md'}")
 
 
 if __name__ == "__main__":
